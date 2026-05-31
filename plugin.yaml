@@ -1,0 +1,7 @@
+name: agent-recall
+version: 0.1.0
+description: "AgentRecall — durable semantic memory provider for Hermes with shared/per-agent isolation."
+hooks:
+  - sync_turn
+  - on_pre_compress
+  - on_memory_write
