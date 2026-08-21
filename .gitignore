@@ -10,3 +10,9 @@ $tmp/
 *.db-wal
 .env
 .DS_Store
+.coverage
+build/
+dist/
+*.egg-info/
+node_modules/
+*.tgz

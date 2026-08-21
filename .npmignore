@@ -1,0 +1,5 @@
+openclaw_plugin/test/
+__pycache__/
+*.py[cod]
+*.db
+*.sqlite

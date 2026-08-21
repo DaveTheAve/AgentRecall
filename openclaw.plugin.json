@@ -1,0 +1,121 @@
+{
+  "id": "agent-recall",
+  "name": "AgentRecall",
+  "description": "Local-first shared memory with automatic recall and native OpenClaw lifecycle integration",
+  "version": "0.2.0",
+  "kind": "memory",
+  "activation": {
+    "onStartup": true,
+    "onCommands": ["memory"]
+  },
+  "contracts": {
+    "tools": [
+      "memory_search",
+      "memory_get",
+      "memory_store",
+      "memory_forget",
+      "agent_recall_update",
+      "agent_recall_curate",
+      "agent_recall_conclude",
+      "agent_recall_profile",
+      "agent_recall_review",
+      "agent_recall_stats"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "configPath": {
+        "type": "string",
+        "description": "Path to AgentRecall JSON configuration"
+      },
+      "workspaceId": {
+        "type": "string",
+        "default": "default"
+      },
+      "agentId": {
+        "type": "string",
+        "description": "Optional fixed identity; otherwise OpenClaw agent ids are namespaced"
+      },
+      "agentIdPrefix": {
+        "type": "string",
+        "default": "openclaw"
+      },
+      "pythonCommand": {
+        "type": "string",
+        "default": "python3"
+      },
+
+      "maxContexts": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1024,
+        "default": 128
+      },
+      "bridgeTimeoutMs": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 600000,
+        "default": 10000
+      },
+      "recallTimeoutMs": {
+        "type": "integer",
+        "minimum": 500,
+        "maximum": 600000,
+        "default": 7000
+      },
+      "prefetchLimit": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 50,
+        "default": 6
+      },
+      "maxContextChars": {
+        "type": "integer",
+        "minimum": 500,
+        "maximum": 100000,
+        "default": 12000
+      },
+      "autoRecall": {
+        "type": "boolean",
+        "default": true
+      },
+      "autoCaptureTurns": {
+        "type": "boolean",
+        "default": true
+      },
+      "autoCaptureCheckpoints": {
+        "type": "boolean",
+        "default": true
+      }
+    }
+  },
+  "uiHints": {
+    "configPath": {
+      "label": "AgentRecall config path",
+      "placeholder": "~/.agent-recall/agent-recall.json"
+    },
+    "workspaceId": {
+      "label": "Shared workspace id"
+    },
+    "agentId": {
+      "label": "Fixed AgentRecall agent id"
+    },
+    "agentIdPrefix": {
+      "label": "OpenClaw agent id prefix"
+    },
+    "pythonCommand": {
+      "label": "Python executable"
+    },
+    "autoRecall": {
+      "label": "Automatic pre-prompt recall"
+    },
+    "autoCaptureTurns": {
+      "label": "Capture completed turns"
+    },
+    "autoCaptureCheckpoints": {
+      "label": "Capture compaction/reset checkpoints"
+    }
+  }
+}

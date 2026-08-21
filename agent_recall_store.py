@@ -151,13 +151,20 @@ CREATE TABLE IF NOT EXISTS links (
 
 
 class AgentRecallStore:
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(self, db_path: str | Path, *, busy_timeout_ms: int = 5_000) -> None:
         self.db_path = Path(db_path).expanduser()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self.busy_timeout_ms = max(1_000, int(busy_timeout_ms or 5_000))
+        self.conn = sqlite3.connect(
+            str(self.db_path),
+            timeout=self.busy_timeout_ms / 1000.0,
+            check_same_thread=False,
+        )
         self.conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         with self._lock:
+            self.conn.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
+            self.conn.execute("PRAGMA foreign_keys=ON")
             with suppress(Exception):
                 self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.executescript(SCHEMA)
@@ -203,28 +210,48 @@ class AgentRecallStore:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    workspace_id, agent_id, source_agent_id or agent_id, user_id or "", session_id or "",
-                    visibility, category or "general", title or "", content, summary or "",
-                    _json_dumps(list(tags or [])), _json_dumps(metadata or {}), _json_dumps(list(embedding)),
-                    embedding_model or "", len(embedding), float(importance), float(confidence), ts, ts,
+                    workspace_id,
+                    agent_id,
+                    source_agent_id or agent_id,
+                    user_id or "",
+                    session_id or "",
+                    visibility,
+                    category or "general",
+                    title or "",
+                    content,
+                    summary or "",
+                    _json_dumps(list(tags or [])),
+                    _json_dumps(metadata or {}),
+                    _json_dumps(list(embedding)),
+                    embedding_model or "",
+                    len(embedding),
+                    float(importance),
+                    float(confidence),
+                    ts,
+                    ts,
                 ),
             )
             self.conn.commit()
             return int(cur.lastrowid)
 
-    def _scope_sql(self, workspace_id: str, agent_id: str, session_id: str, include_shared: bool = True) -> tuple[str, list[Any]]:
+    def _scope_sql(
+        self, workspace_id: str, agent_id: str, session_id: str, include_shared: bool = True
+    ) -> tuple[str, list[Any]]:
         clauses = ["workspace_id = ?", "archived = 0"]
         args: list[Any] = [workspace_id]
         visible = ["(visibility = 'agent' AND agent_id = ?)"]
         args.append(agent_id)
-        visible.append("(visibility = 'session' AND agent_id = ? AND session_id = ?)")
-        args.extend([agent_id, session_id or ""])
+        if session_id:
+            visible.append("(visibility = 'session' AND agent_id = ? AND session_id = ?)")
+            args.extend([agent_id, session_id])
         if include_shared:
             visible.append("visibility = 'shared'")
         clauses.append("(" + " OR ".join(visible) + ")")
         return " AND ".join(clauses), args
 
-    def get_visible(self, memory_id: int, workspace_id: str, agent_id: str, session_id: str, include_shared: bool = True) -> sqlite3.Row | None:
+    def get_visible(
+        self, memory_id: int, workspace_id: str, agent_id: str, session_id: str, include_shared: bool = True
+    ) -> sqlite3.Row | None:
         scope, args = self._scope_sql(workspace_id, agent_id, session_id, include_shared)
         with self._lock:
             row = self.conn.execute(f"SELECT * FROM memories WHERE id = ? AND {scope}", [memory_id] + args).fetchone()
@@ -241,6 +268,13 @@ class AgentRecallStore:
         include_shared: bool = True,
         category: str = "",
         tags: Sequence[str] | None = None,
+        visibility: str = "",
+        source_agent_id: str = "",
+        min_importance: float | None = None,
+        updated_after: float | None = None,
+        min_score: float | None = None,
+        explain: bool = False,
+        track_access: bool = True,
         limit: int = 8,
     ) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit or 8), 50))
@@ -248,37 +282,102 @@ class AgentRecallStore:
         if category:
             scope += " AND category = ?"
             args.append(category)
+        if visibility:
+            if visibility not in {"agent", "shared", "session"}:
+                raise ValueError("visibility must be one of: agent, shared, session")
+            scope += " AND visibility = ?"
+            args.append(visibility)
+        if source_agent_id:
+            scope += " AND source_agent_id = ?"
+            args.append(source_agent_id)
+        if min_importance is not None:
+            scope += " AND importance >= ?"
+            args.append(max(0.0, min(float(min_importance), 1.0)))
+        if updated_after is not None:
+            scope += " AND updated_at >= ?"
+            args.append(float(updated_after))
         with self._lock:
             rows = list(self.conn.execute(f"SELECT * FROM memories WHERE {scope} ORDER BY updated_at DESC", args))
         tagset = {t.lower() for t in (tags or []) if t}
         if tagset:
-            rows = [r for r in rows if tagset.intersection({str(t).lower() for t in _json_loads(r['tags_json'], [])})]
+            rows = [r for r in rows if tagset.intersection({str(t).lower() for t in _json_loads(r["tags_json"], [])})]
 
         q = (query or "").strip().lower()
-        scored: list[tuple[float, sqlite3.Row]] = []
+        if explain:
+            scored_explained: list[tuple[float, sqlite3.Row, dict[str, float]]] = []
+        else:
+            scored: list[tuple[float, sqlite3.Row]] = []
+        score_floor = None if min_score is None else max(0.0, min(float(min_score), 1.0))
+        now = _now()
         for row in rows:
             emb = _json_loads(row["embedding_json"], [])
             vector_score = cosine(query_embedding or [], emb) if query_embedding else 0.0
-            hay = " ".join([row["title"] or "", row["content"] or "", row["summary"] or "", row["category"] or "", row["tags_json"] or ""]).lower()
+            hay = " ".join(
+                [
+                    row["title"] or "",
+                    row["content"] or "",
+                    row["summary"] or "",
+                    row["category"] or "",
+                    row["tags_json"] or "",
+                ]
+            ).lower()
             lexical = 0.0
             if q:
-                terms = [t for t in q.replace('"', ' ').split() if len(t) > 1]
+                terms = [t for t in q.replace('"', " ").split() if len(t) > 1]
                 if terms:
                     lexical = sum(1 for t in terms if t in hay) / len(terms)
-            recency_days = max(0.0, (_now() - float(row["updated_at"])) / 86400.0)
+            recency_days = max(0.0, (now - float(row["updated_at"])) / 86400.0)
             recency = 1.0 / (1.0 + recency_days / 30.0)
             importance = float(row["importance"] or 0.5)
             score = (0.58 * vector_score) + (0.25 * lexical) + (0.10 * importance) + (0.07 * recency)
-            scored.append((score, row))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        out = [self._format_row(row, score=score) for score, row in scored[:limit]]
+            if score_floor is not None and score < score_floor:
+                continue
+            if explain:
+                scored_explained.append(
+                    (
+                        score,
+                        row,
+                        {
+                            "vector": round(vector_score, 4),
+                            "lexical": round(lexical, 4),
+                            "importance": round(importance, 4),
+                            "recency": round(recency, 4),
+                        },
+                    )
+                )
+            else:
+                scored.append((score, row))
+        if explain:
+            scored_explained.sort(key=lambda item: item[0], reverse=True)
+            out = [
+                self._format_row(row, score=score, score_explanation=details)
+                for score, row, details in scored_explained[:limit]
+            ]
+        else:
+            scored.sort(key=lambda item: item[0], reverse=True)
+            out = [self._format_row(row, score=score) for score, row in scored[:limit]]
         ids = [r["id"] for r in out]
-        if ids:
+        if ids and track_access:
             qmarks = ",".join("?" for _ in ids)
             with self._lock:
-                self.conn.execute(f"UPDATE memories SET access_count = access_count + 1, last_accessed_at = ? WHERE id IN ({qmarks})", [_now()] + ids)
+                self.conn.execute(
+                    f"UPDATE memories SET access_count = access_count + 1, last_accessed_at = ? WHERE id IN ({qmarks})",
+                    [_now()] + ids,
+                )
                 self.conn.commit()
         return out
+
+    def get_memory(
+        self,
+        memory_id: int,
+        workspace_id: str,
+        agent_id: str,
+        session_id: str,
+        *,
+        include_shared: bool = True,
+    ) -> dict[str, Any] | None:
+        row = self.get_visible(memory_id, workspace_id, agent_id, session_id, include_shared=include_shared)
+        return self._format_row(row) if row else None
 
     def update_memory(
         self,
@@ -288,6 +387,7 @@ class AgentRecallStore:
         session_id: str,
         *,
         allow_shared_mutation: bool = False,
+        expected_updated_at: float | None = None,
         **updates: Any,
     ) -> bool:
         row = self.get_visible(memory_id, workspace_id, agent_id, session_id, include_shared=True)
@@ -298,22 +398,50 @@ class AgentRecallStore:
         # agent from silently rewriting another agent's published facts.
         if row["agent_id"] != agent_id and not (row["visibility"] == "shared" and allow_shared_mutation):
             return False
-        allowed = {"content", "title", "summary", "category", "visibility", "tags_json", "metadata_json", "embedding_json", "embedding_model", "embedding_dimensions", "importance", "confidence", "archived"}
+        if row["agent_id"] != agent_id and (
+            "target_session_id" in updates
+            or ("visibility" in updates and updates["visibility"] != "shared")
+        ):
+            return False
+        allowed = {
+            "content",
+            "title",
+            "summary",
+            "category",
+            "visibility",
+            "target_session_id",
+            "tags_json",
+            "metadata_json",
+            "embedding_json",
+            "embedding_model",
+            "embedding_dimensions",
+            "importance",
+            "confidence",
+            "archived",
+        }
         sets = []
         args: list[Any] = []
         for key, val in updates.items():
             if key in allowed:
-                sets.append(f"{key} = ?")
+                column = "session_id" if key == "target_session_id" else key
+                sets.append(f"{column} = ?")
                 args.append(val)
         if not sets:
             return True
         sets.append("updated_at = ?")
         args.append(_now())
-        args.append(memory_id)
+        mutation_version = float(expected_updated_at) if expected_updated_at is not None else float(row["updated_at"])
+        where = "id = ? AND workspace_id = ? AND updated_at = ?"
+        args.extend([memory_id, workspace_id, mutation_version])
+        if row["agent_id"] == agent_id:
+            where += " AND agent_id = ?"
+            args.append(agent_id)
+        else:
+            where += " AND visibility = 'shared'"
         with self._lock:
-            self.conn.execute(f"UPDATE memories SET {', '.join(sets)} WHERE id = ?", args)
+            cursor = self.conn.execute(f"UPDATE memories SET {', '.join(sets)} WHERE {where}", args)
             self.conn.commit()
-        return True
+        return cursor.rowcount > 0
 
     def delete_memory(
         self,
@@ -329,22 +457,53 @@ class AgentRecallStore:
             return False
         if row["agent_id"] != agent_id and not (row["visibility"] == "shared" and allow_shared_mutation):
             return False
+        where = "id = ? AND workspace_id = ? AND updated_at = ?"
+        args: list[Any] = [memory_id, workspace_id, float(row["updated_at"])]
+        if row["agent_id"] == agent_id:
+            where += " AND agent_id = ?"
+            args.append(agent_id)
+        else:
+            where += " AND visibility = 'shared'"
         with self._lock:
-            self.conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+            cursor = self.conn.execute(f"DELETE FROM memories WHERE {where}", args)
             self.conn.commit()
-        return True
+        return cursor.rowcount > 0
 
-    def stats(self, workspace_id: str, agent_id: str, session_id: str = "", include_shared: bool = True) -> dict[str, Any]:
+    def stats(
+        self, workspace_id: str, agent_id: str, session_id: str = "", include_shared: bool = True
+    ) -> dict[str, Any]:
         scope, args = self._scope_sql(workspace_id, agent_id, session_id, include_shared)
         with self._lock:
             rows = self.conn.execute(
                 f"SELECT visibility, agent_id, category, COUNT(*) n FROM memories WHERE {scope} GROUP BY visibility, agent_id, category",
                 args,
             ).fetchall()
-        return {"workspace_id": workspace_id, "current_agent_id": agent_id, "db_path": str(self.db_path), "buckets": [dict(r) for r in rows]}
-
-    def _format_row(self, row: sqlite3.Row, score: float = 0.0) -> dict[str, Any]:
         return {
+            "workspace_id": workspace_id,
+            "current_agent_id": agent_id,
+            "db_path": str(self.db_path),
+            "buckets": [dict(r) for r in rows],
+        }
+
+    def health(self) -> dict[str, Any]:
+        with self._lock:
+            journal_mode = str(self.conn.execute("PRAGMA journal_mode").fetchone()[0])
+            busy_timeout_ms = int(self.conn.execute("PRAGMA busy_timeout").fetchone()[0])
+            quick_check = str(self.conn.execute("PRAGMA quick_check").fetchone()[0])
+        return {
+            "db_path": str(self.db_path),
+            "journal_mode": journal_mode,
+            "busy_timeout_ms": busy_timeout_ms,
+            "quick_check": quick_check,
+        }
+
+    def _format_row(
+        self,
+        row: sqlite3.Row,
+        score: float = 0.0,
+        score_explanation: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
+        result = {
             "id": int(row["id"]),
             "score": round(float(score), 4),
             "workspace_id": row["workspace_id"],
@@ -363,3 +522,6 @@ class AgentRecallStore:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
+        if score_explanation is not None:
+            result["score_explanation"] = score_explanation
+        return result

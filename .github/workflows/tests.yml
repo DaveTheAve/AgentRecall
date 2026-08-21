@@ -15,9 +15,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.19"
       - name: Install test dependencies
-        run: python -m pip install pytest ruff
+        run: python -m pip install -e '.[dev,mcp]'
       - name: Ruff
         run: ruff check .
-      - name: Pytest
-        run: python -m pytest tests
+      - name: Test
+        run: python -m pytest
+      - name: Test OpenClaw adapter
+        run: npm test

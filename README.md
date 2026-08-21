@@ -1,8 +1,8 @@
 # AgentRecall
 
-> Durable, local-first semantic memory for Hermes Agent. Your agents can now remember the important stuff, forget the embarrassing stuff on purpose, and stop treating every new session like they just woke up in a hedge.
+> Durable, local-first memory for AI agents across native Hermes, OpenClaw, and MCP integrations.
 
-AgentRecall is a Python memory-provider plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent). It gives Hermes profiles and agent processes a local, inspectable memory store with explicit workspace, agent, session, and shared-memory boundaries.
+AgentRecall is a host-agnostic Python memory engine with first-class adapters. Hermes keeps its original direct, in-process memory-provider integration. OpenClaw uses its native memory slot, prompt and session lifecycle hooks, standard memory runtime, and a persistent local stdio bridge to the same Python core. Other hosts can use the optional MCP server. Profiles and hosts can safely share one SQLite workspace while retaining distinct agent/session identities.
 
 The memories live in SQLite. You can inspect them, back them up, delete them, and glare at them when an agent remembers the exact wrong thing. Nothing vanishes into an opaque vendor-side memory swamp.
 
@@ -15,7 +15,7 @@ AgentRecall combines:
 - SQLite for durable memory rows and ACL metadata.
 - OpenAI-compatible embeddings for semantic retrieval, plus lexical scoring because exact words occasionally deserve a little respect.
 - An optional chat-model curation backend that turns a wall of messy text into candidate memories instead of turning it into a new religion.
-- Hermes provider tools for storing, searching, reviewing, importing, and curating memories.
+- Native Hermes and OpenClaw tools for storing, searching, reviewing, importing, and curating memories.
 
 It is designed for people who want several agents to share useful context without making every agent's private notes public. A daring concept.
 
@@ -23,10 +23,10 @@ It is designed for people who want several agents to share useful context withou
 
 Use AgentRecall when you want to:
 
-- Share durable facts across several Hermes profiles in one workspace.
+- Share durable facts across Hermes profiles, OpenClaw agents, and other hosts in one workspace.
 - Keep agent-specific memories private while allowing intentionally shared facts.
 - Store user preferences, environment conventions, project facts, decisions, and source-backed conclusions.
-- Retrieve relevant context automatically through Hermes memory prefetch.
+- Retrieve relevant context automatically through Hermes prefetch or OpenClaw's `before_prompt_build` hook.
 - Curate a long conversation or note into reviewable durable-memory candidates.
 - Import Markdown notes from explicitly allowed locations.
 - Back up your memory database without asking an AI vendor for a boat and a search party.
@@ -38,22 +38,25 @@ It is not intended to be a secret store, a complete transcript archive, or an ex
 - Local-first storage with explicit network endpoints.
 - Clear workspace, agent, session, and shared-memory isolation.
 - Configurable curation. No hard-coded loyalty to a particular model, provider, or mystical moon phase.
-- Simple installation as a Hermes user plugin.
+- Native plugin installation for Hermes and OpenClaw, with MCP as an optional interface.
 - Conservative import and auto-capture defaults.
 - Public-repo hygiene: MIT license, security policy, contributing guide, CI, tests, and no committed credentials. Because leaking an API key is a memorable event in the bad sense.
 
 ## Architecture
 
 ```text
-Hermes memory provider API
-        |
-        v
-AgentRecallProvider
-        |
-        +-- AgentRecallStore  -> SQLite memory rows + ACL filters
-        +-- EmbeddingClient   -> POST <embedding_base_url>/embeddings
-        +-- Curation backend  -> codex-cli or OpenAI-compatible chat completions
+                         AgentRecallCore
+                 (policy, retrieval, ACL, curation)
+                    /          |           \
+                   /           |            \
+      Hermes native adapter  OpenClaw adapter    MCP adapter
+       direct / in-process   native hooks+stdio  stdio / HTTP
+                   \           |            /
+                    +---- AgentRecallStore -+
+                           SQLite WAL
 ```
+
+`AgentRecallCore` owns host-independent behavior. Adapters translate host lifecycles and tool protocols without reimplementing memory semantics. Hermes does not use MCP internally and requires no daemon or network service. OpenClaw uses a long-lived local child process rather than MCP internally, preserving MCP as an independent public interface. See [Architecture](docs/ARCHITECTURE.md), [MCP](docs/MCP.md), and [OpenClaw integration](docs/OPENCLAW.md).
 
 Semantic retrieval uses stored embeddings and lexical scoring. Curation is separate: a chat model proposes candidate memories, then AgentRecall applies the same visibility, metadata, exclusion, embedding, and ACL rules used by explicit memory writes. The robot still has to fill out the paperwork.
 
@@ -86,6 +89,30 @@ hermes -p agentforge memory setup agent-recall
 
 Installing the files does not activate the provider. Hermes only uses AgentRecall after `memory.provider` is set to `agent-recall`. This is intentional. Surprise memory systems have never been a universally beloved product category.
 
+### OpenClaw
+
+OpenClaw has a first-class exclusive memory slot. Create the AgentRecall JSON config first; explicit adapter config paths fail closed if missing or malformed. The installer then links this tree, explicitly acknowledges OpenClaw's child-process security scan, enables the conversation/prompt hook permissions required for automatic recall and capture, and selects AgentRecall as the memory plugin:
+
+```bash
+python scripts/install_openclaw_plugin.py \
+  --config-path ~/.agent-recall/agent-recall.json \
+  --workspace-id shared-workspace
+```
+
+Restart the OpenClaw gateway after installation. OpenClaw agents default to separate identities such as `openclaw:main`; set a fixed `agentId` only when intentional. See [docs/OPENCLAW.md](docs/OPENCLAW.md).
+
+### MCP
+
+MCP is optional and does not affect Hermes:
+
+```bash
+# Local stdio server (installs the optional MCP SDK and console entry point)
+pip install '.[mcp]'
+agent-recall-mcp --config /path/to/agent-recall.json --transport stdio
+```
+
+MCP can also be configured additively in OpenClaw for external interoperability or administrative tools; it does not replace the native OpenClaw memory plugin. Never expose the HTTP server without authentication.
+
 ## Configuration
 
 AgentRecall reads configuration from:
@@ -105,6 +132,7 @@ A practical local configuration:
   "embedding_model": "qwen3-embedding-4b",
   "embedding_api_key_env": "LLM_OPENAI_API_KEY",
   "embedding_dimensions": 0,
+  "sqlite_busy_timeout_ms": 5000,
   "default_visibility": "agent",
   "shared_recall": true,
   "raw_memories_enabled": true,
@@ -128,6 +156,7 @@ A practical local configuration:
   "auto_capture_turns": false,
   "auto_capture_compression_checkpoints": false,
   "allow_any_agent_to_mutate_shared": false,
+  "mcp_access": "read-write",
   "excluded_terms": ["example-sensitive-project"]
 }
 ```
@@ -150,7 +179,8 @@ Profiles that should share the same database and workspace use the same `db_path
 | `embedding_base_url` | OpenAI-compatible embeddings endpoint. |
 | `embedding_model` | Embedding model to call. |
 | `embedding_dimensions` | Positive values send `dimensions`; `0` omits it. |
-| `raw_memories_enabled` | Enables direct `agent_recall_remember` writes. |
+| `sqlite_busy_timeout_ms` | SQLite lock wait used by every host process; default 5000 ms (below Hermes's prefetch deadline). |
+| `raw_memories_enabled` | Enables direct `agent_recall_remember` storage. |
 | `curated_memories_enabled` | Enables the curation layer. |
 | `conclusions_enabled` | Enables source-backed conclusions with provenance. |
 | `peer_profiles_enabled` | Enables peer-profile synthesis. |
@@ -170,6 +200,7 @@ Profiles that should share the same database and workspace use the same `db_path
 | `auto_capture_turns` | Stores completed turns as session-scoped transcripts. Defaults to `false`, because databases deserve mercy. |
 | `auto_capture_compression_checkpoints` | Stores pre-compression checkpoints. Defaults to `false`. |
 | `allow_any_agent_to_mutate_shared` | Lets any trusted agent edit shared facts. Default: owner-only. |
+| `mcp_access` | MCP policy: `read-only` or `read-write`; server identity remains fixed at startup. |
 | `excluded_terms` | Case-insensitive terms blocked from storing, importing, or curation. |
 
 Common environment overrides are also supported:
@@ -319,10 +350,11 @@ uv run --with ruff ruff check .
 Run a compile check:
 
 ```bash
-python -m py_compile __init__.py agent_recall_store.py agent_recall_curator.py cli.py scripts/install_user_plugin.py tests/*.py
+python -m py_compile __init__.py agent_recall_core.py agent_recall_store.py agent_recall_curator.py agent_recall_schemas.py agent_recall_mcp.py agent_recall_bridge.py cli.py scripts/*.py tests/*.py
+npm test
 ```
 
-The test suite covers workspace isolation, private/shared/session visibility, shared-mutation policy, tool behavior, curation configuration, config normalization, checkpoint hooks, built-in-memory mirroring, Markdown import restrictions, embeddings endpoint behavior, excluded terms, and public wording. The tests are serious even if this README occasionally needs to lie down.
+The test suite covers workspace isolation, private/shared/session visibility, shared-mutation policy, Hermes tool and lifecycle compatibility, curation configuration, config normalization, checkpoints, built-in-memory mirroring, Markdown import restrictions, embedding fallback, excluded terms, core/adapter boundaries, the OpenClaw memory-slot package and persistent bridge, MCP stdio and authenticated Streamable HTTP, and concurrent SQLite writers.
 
 ## Security and production notes
 

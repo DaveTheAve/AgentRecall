@@ -1,6 +1,6 @@
 name: agent-recall
-version: 0.1.0
-description: "AgentRecall — durable semantic memory provider for Hermes with shared/per-agent isolation."
+version: 0.2.0
+description: "AgentRecall — host-neutral local memory engine with a native Hermes adapter."
 hooks:
   - sync_turn
   - on_pre_compress

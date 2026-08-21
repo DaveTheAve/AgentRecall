@@ -1,12 +1,12 @@
 [project]
 name = "agent-recall-hermes-plugin"
-version = "0.1.0"
-description = "AgentRecall: durable semantic memory provider plugin for Hermes Agent"
+version = "0.2.0"
+description = "Local-first, host-agnostic memory engine with native Hermes, OpenClaw, and MCP adapters"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "David Campbell" }]
-keywords = ["hermes-agent", "memory", "embeddings", "sqlite", "agents"]
+keywords = ["memory", "embeddings", "sqlite", "agents", "hermes-agent", "openclaw", "mcp"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -22,6 +22,21 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.5"]
+mcp = ["mcp>=1.14,<2"]
+
+[project.scripts]
+agent-recall-mcp = "agent_recall_mcp:main"
+agent-recall-bridge = "agent_recall_bridge:main"
+
+[tool.setuptools]
+py-modules = [
+  "agent_recall_core",
+  "agent_recall_curator",
+  "agent_recall_bridge",
+  "agent_recall_mcp",
+  "agent_recall_schemas",
+  "agent_recall_store",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

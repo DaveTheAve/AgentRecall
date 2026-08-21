@@ -1,0 +1,40 @@
+{
+  "name": "agent-recall",
+  "version": "0.2.0",
+  "description": "Native OpenClaw memory plugin backed by the local-first AgentRecall engine",
+  "type": "module",
+  "license": "MIT",
+  "main": "./openclaw_plugin/index.js",
+  "exports": "./openclaw_plugin/index.js",
+  "files": [
+    "openclaw_plugin/index.js",
+    "openclaw_plugin/bridge-client.js",
+    "openclaw.plugin.json",
+    "agent_recall_bridge.py",
+    "agent_recall_core.py",
+    "agent_recall_curator.py",
+    "agent_recall_store.py",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test openclaw_plugin/test/*.test.mjs"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.5.22"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "openclaw": {
+    "extensions": [
+      "./openclaw_plugin/index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.5.22",
+      "minGatewayVersion": ">=2026.5.22"
+    }
+  }
+}
