@@ -13,9 +13,11 @@ Status: alpha, production-oriented. The project has tests, access controls, impo
 AgentRecall combines:
 
 - SQLite for durable memory rows and ACL metadata.
-- OpenAI-compatible embeddings for semantic retrieval, plus lexical scoring because exact words occasionally deserve a little respect.
+- Deterministic FTS5/BM25 and OpenAI-compatible embedding fusion, plus embedding-free lexical prefix fallback.
+- Canonical keys for updating stable durable facts in place instead of accumulating duplicates.
+- Optional expiration and explicit physical cleanup while permanent memory remains the default.
 - An optional chat-model curation backend that turns a wall of messy text into candidate memories instead of turning it into a new religion.
-- Native Hermes and OpenClaw tools for storing, searching, reviewing, importing, and curating memories.
+- Native host tools for storing, searching, reviewing, and curating memories; Hermes additionally exposes controlled Markdown import.
 
 It is designed for people who want several agents to share useful context without making every agent's private notes public. A daring concept.
 
@@ -84,7 +86,7 @@ hermes memory setup agent-recall
 For a named profile:
 
 ```bash
-hermes -p agentforge memory setup agent-recall
+hermes -p coding-agent memory setup agent-recall
 ```
 
 Installing the files does not activate the provider. Hermes only uses AgentRecall after `memory.provider` is set to `agent-recall`. This is intentional. Surprise memory systems have never been a universally beloved product category.
@@ -94,12 +96,20 @@ Installing the files does not activate the provider. Hermes only uses AgentRecal
 OpenClaw has a first-class exclusive memory slot. Create the AgentRecall JSON config first; explicit adapter config paths fail closed if missing or malformed. The installer then links this tree, explicitly acknowledges OpenClaw's child-process security scan, enables the conversation/prompt hook permissions required for automatic recall and capture, and selects AgentRecall as the memory plugin:
 
 ```bash
-python scripts/install_openclaw_plugin.py \
+python3 scripts/install_openclaw_plugin.py \
   --config-path ~/.agent-recall/agent-recall.json \
   --workspace-id shared-workspace
 ```
 
 Restart the OpenClaw gateway after installation. OpenClaw agents default to separate identities such as `openclaw:main`; set a fixed `agentId` only when intentional. See [docs/OPENCLAW.md](docs/OPENCLAW.md).
+
+For a registry-installed npm package, run the same packaged installer from the consuming project and copy it into OpenClaw's managed plugin area:
+
+```bash
+python3 node_modules/agent-recall/scripts/install_openclaw_plugin.py --copy \
+  --config-path ~/.agent-recall/agent-recall.json \
+  --workspace-id shared-workspace
+```
 
 ### MCP
 
@@ -128,8 +138,8 @@ A practical local configuration:
   "db_path": "$HERMES_HOME/shared-memory/agent-recall.db",
   "workspace_id": "shared-workspace",
   "agent_id": "hermes",
-  "embedding_base_url": "http://127.0.0.1:6660/v1",
-  "embedding_model": "qwen3-embedding-4b",
+  "embedding_base_url": "http://127.0.0.1:8000/v1",
+  "embedding_model": "your-embedding-model",
   "embedding_api_key_env": "LLM_OPENAI_API_KEY",
   "embedding_dimensions": 0,
   "sqlite_busy_timeout_ms": 5000,
@@ -161,11 +171,13 @@ A practical local configuration:
 }
 ```
 
+Replace `embedding_base_url` and `embedding_model` with the endpoint and model exposed by your embedding service.
+
 Profiles that should share the same database and workspace use the same `db_path` and `workspace_id`, but each profile gets its own `agent_id`:
 
 ```json
 {
-  "agent_id": "agentforge"
+  "agent_id": "coding-agent"
 }
 ```
 
@@ -241,6 +253,44 @@ AND (
 ```
 
 By default, private and session memories are owner-only. Shared memories are readable cross-agent but can be edited or deleted only by their owner. Set `allow_any_agent_to_mutate_shared` to `true` only when every participating agent is trusted not to turn a typo into workplace folklore.
+
+## Canonical facts, expiration, and cleanup
+
+AgentRecall v0.3.0 adds two optional lifecycle fields:
+
+- `canonical_key` identifies a stable fact that should update in place. Durable `agent` and `shared` keys remain stable across sessions; `session` keys remain isolated to their session.
+- `expires_at` is a Unix timestamp. Omit it or set it to `0` for a permanent memory.
+
+For example, a host can remember a current preference with `canonical_key="preference.response_style"` and later write the same key to update the existing row instead of creating a second durable fact. Set `expires_at` only for facts with a real lifetime; expiration is never mandatory.
+
+Expired rows are excluded from recall immediately. Physical cleanup is an explicit maintenance operation on `AgentRecallStore`, not an LLM-callable Hermes, MCP, or OpenClaw tool, because it hard-deletes rows and can optionally compact SQLite. Upgrades do not run physical cleanup automatically.
+
+Retrieval remains bounded and deterministic: public search returns at most 50 rows, internal candidate processing is capped at 500 rows, ACL/tag/scalar filters are applied before candidate limiting, and exact score ties use memory ID as the secondary order.
+
+The bound applies to Python candidate materialization and scoring, not SQLite's filtering/sorting work or end-to-end latency. Semantic retrieval is approximate: the vector source window is selected by importance and recency, so older or lower-importance semantic matches outside that window may be missed.
+
+## Upgrading from v0.2.0
+
+The v0.3.0 schema migration is additive. On first open, AgentRecall adds `canonical_key`, `expires_at`, and their supporting indexes. Existing rows receive permanent defaults, and v0.2.0 code can still open the migrated database because it ignores the added columns and indexes.
+
+Before upgrading a production database, create a SQLite-consistent online backup rather than copying only the main `.db` file while WAL writers may be active:
+
+```python
+import sqlite3
+
+source = sqlite3.connect("file:/path/to/agent-recall.db?mode=ro", uri=True)
+backup = sqlite3.connect("/path/to/agent-recall-before-v0.3.0.db")
+source.backup(backup)
+assert backup.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+backup.close()
+source.close()
+```
+
+Concurrent first-open migration is supported, but a controlled canary restart is easier to observe: start one upgraded host, verify health/search/write behavior, then restart the remaining hosts. Do not run physical cleanup as part of the migration.
+
+Code rollback to v0.2.0 is supported with the additive schema left in place. If data restoration is required instead, stop every writer before replacing the database with the online backup. See [CHANGELOG.md](CHANGELOG.md) and [Architecture](docs/ARCHITECTURE.md) for details.
+
+Schema compatibility does not preserve new feature semantics in old hosts: v0.2.0 ignores expiration and does not perform canonical upserts. Avoid mixed-version operation when expiration filtering matters.
 
 ## Curation
 
@@ -350,7 +400,7 @@ uv run --with ruff ruff check .
 Run a compile check:
 
 ```bash
-python -m py_compile __init__.py agent_recall_core.py agent_recall_store.py agent_recall_curator.py agent_recall_schemas.py agent_recall_mcp.py agent_recall_bridge.py cli.py scripts/*.py tests/*.py
+python -m py_compile __init__.py hermes_plugin/__init__.py agent_recall_core.py agent_recall_store.py agent_recall_curator.py agent_recall_schemas.py agent_recall_mcp.py agent_recall_bridge.py cli.py scripts/*.py tests/*.py
 npm test
 ```
 

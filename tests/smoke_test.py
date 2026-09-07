@@ -56,17 +56,19 @@ def main():
         b = json.loads(p1.handle_tool_call("agent_recall_remember", {"content": "Hermes private implementation note", "visibility": "agent", "category": "agent"}))
         assert a["success"] and b["success"]
         blocked = json.loads(p1.handle_tool_call("agent_recall_remember", {"content": "blocked-project should not be stored"}))
-        assert not blocked["success"]
+        # Hermes's native tool_error uses {"error": ...}; the standalone fallback
+        # also includes success=False. Both must reject the excluded content.
+        assert blocked.get("success") is not True and blocked.get("error")
         p1.shutdown()
 
         p2 = AgentRecallProvider({
             "db_path": db,
             "workspace_id": "shared-ws",
-            "agent_id": "agentforge",
+            "agent_id": "other-agent",
             "embedding_base_url": "",
             "embedding_model": "fake",
         })
-        p2.initialize("s2", hermes_home=td, agent_identity="agentforge")
+        p2.initialize("s2", hermes_home=td, agent_identity="other-agent")
         p2._embedder = FakeEmbedder()
         result = json.loads(p2.handle_tool_call("agent_recall_search", {"query": "concise output", "limit": 10}))
         contents = [r["content"] for r in result["results"]]

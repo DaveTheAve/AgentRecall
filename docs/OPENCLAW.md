@@ -48,12 +48,20 @@ Prerequisites: OpenClaw `>=2026.5.22`, Node.js `>=22.19`, and Python `>=3.10` av
 From this repository:
 
 ```bash
-python scripts/install_openclaw_plugin.py \
+python3 scripts/install_openclaw_plugin.py \
   --config-path ~/.agent-recall/agent-recall.json \
   --workspace-id shared-workspace
 ```
 
 Then restart the OpenClaw gateway. Pass `--copy` for a self-contained managed copy instead of a development symlink; the npm package includes the Python core and bridge modules needed by that copy.
+
+If the npm package was installed into another project with `npm install agent-recall`, invoke the bundled installer directly and request a managed copy:
+
+```bash
+python3 node_modules/agent-recall/scripts/install_openclaw_plugin.py --copy \
+  --config-path ~/.agent-recall/agent-recall.json \
+  --workspace-id shared-workspace
+```
 
 The plugin intentionally starts a local Python child process. OpenClaw's static installer therefore reports `node:child_process` and requires `--dangerously-force-unsafe-install`. The installer supplies that explicit operator acknowledgement and does not hide or bypass the scan. Review `openclaw_plugin/bridge-client.js` before installation if this checkout is not trusted.
 
@@ -86,8 +94,8 @@ The Python config controls the database, embeddings, curation, ACLs, and capture
 {
   "db_path": "~/.hermes/shared-memory/agent-recall.db",
   "workspace_id": "shared-workspace",
-  "embedding_base_url": "http://127.0.0.1:6660/v1",
-  "embedding_model": "qwen3-embedding-4b",
+  "embedding_base_url": "http://127.0.0.1:8000/v1",
+  "embedding_model": "your-embedding-model",
   "shared_recall": true,
   "raw_memories_enabled": true,
   "auto_capture_turns": true,
@@ -153,6 +161,10 @@ agent_recall_profile
 agent_recall_review
 agent_recall_stats
 ```
+
+In v0.3, `memory_store` accepts optional `canonicalKey` and `expiresAt` fields. Reusing a canonical key updates the stable fact in place; durable agent/shared keys span sessions while session-visible keys remain session-specific. Omit `expiresAt` or pass `0` for a permanent memory. `agent_recall_update` also accepts `expiresAt`, including `0` to clear a prior expiration.
+
+Physical cleanup remains a trusted direct-store maintenance operation rather than an OpenClaw tool because it performs destructive hard deletion and optional database compaction.
 
 All operations delegate to AgentRecall Core. Workspace/agent/session ACLs, exclusions, shared-owner mutation rules, embedding fallback, and curation feature flags therefore match Hermes and MCP. OpenClaw curation defaults to `dry_run=true`; pass `dry_run=false` explicitly to store candidates.
 

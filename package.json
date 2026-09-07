@@ -1,6 +1,6 @@
 {
   "name": "agent-recall",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Native OpenClaw memory plugin backed by the local-first AgentRecall engine",
   "type": "module",
   "license": "MIT",
@@ -14,6 +14,11 @@
     "agent_recall_core.py",
     "agent_recall_curator.py",
     "agent_recall_store.py",
+    "scripts/install_openclaw_plugin.py",
+    "docs/OPENCLAW.md",
+    "docs/ARCHITECTURE.md",
+    "docs/MCP.md",
+    "CHANGELOG.md",
     "LICENSE",
     "README.md"
   ],

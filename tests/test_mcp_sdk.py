@@ -47,6 +47,8 @@ def test_real_mcp_stdio_discovery_and_health(tmp_path):
             tools = await session.list_tools()
             names = {tool.name for tool in tools.tools}
             assert {"remember", "search", "prefetch_context", "get_memory", "health", "capabilities"} <= names
+            remember_tool = next(tool for tool in tools.tools if tool.name == "remember")
+            assert {"canonical_key", "expires_at"} <= set(remember_tool.inputSchema["properties"])
             health = await session.call_tool("health", {})
             assert health.isError is False
             assert "quick_check" in str(health.structuredContent or health.content)

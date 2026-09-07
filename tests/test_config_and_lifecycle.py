@@ -17,8 +17,8 @@ def test_save_config_expands_hermes_home_and_initialize_uses_agent_identity(tmp_
     if os.name == "posix":
         assert (tmp_path / "agent-recall.json").stat().st_mode & 0o777 == 0o600
 
-    p.initialize("s", hermes_home=tmp_path, agent_identity="agentforge")
-    assert p._agent_id == "agentforge"
+    p.initialize("s", hermes_home=tmp_path, agent_identity="other-agent")
+    assert p._agent_id == "other-agent"
     assert p._workspace_id == "ws"
 
 

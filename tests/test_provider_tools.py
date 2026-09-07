@@ -53,10 +53,26 @@ def test_excluded_terms_block_storage(tmp_path):
 
 def test_prefetch_formats_recalled_context(tmp_path):
     p = make_provider(tmp_path)
-    json.loads(p.handle_tool_call("agent_recall_remember", {"content": "AgentForge uses local Qwen for main reasoning", "visibility": "shared"}))
-    block = p.prefetch("What does AgentForge use?", session_id="session-1")
+    json.loads(p.handle_tool_call("agent_recall_remember", {"content": "The coding agent uses a local model for main reasoning", "visibility": "shared"}))
+    block = p.prefetch("What does the coding agent use?", session_id="session-1")
     assert "AgentRecall Recalled Context" in block
-    assert "AgentForge uses local Qwen" in block
+    assert "coding agent uses a local model" in block
+
+
+def test_prefetch_honors_the_explicit_session_after_the_provider_switches(tmp_path):
+    p = make_provider(tmp_path)
+    stored = json.loads(
+        p.handle_tool_call(
+            "agent_recall_remember",
+            {"content": "Session one private deployment note", "visibility": "session"},
+        )
+    )
+    assert stored["success"] is True
+    p.on_session_switch("session-2")
+
+    assert p.prefetch("private deployment note", session_id="session-2") == ""
+    original = p.prefetch("private deployment note", session_id="session-1")
+    assert "Session one private deployment note" in original
 
 
 class FailingEmbedder:

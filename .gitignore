@@ -8,6 +8,11 @@ $tmp/
 *.db
 *.db-shm
 *.db-wal
+*.db-journal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
 .env
 .DS_Store
 .coverage
@@ -16,3 +21,4 @@ dist/
 *.egg-info/
 node_modules/
 *.tgz
+Archive.tar.gz

@@ -10,7 +10,8 @@ def test_default_embedding_base_url_ignores_remote_openai_base_url(monkeypatch, 
     mod = load_provider_module()
     p = mod.AgentRecallProvider({"db_path": str(tmp_path / "agent-recall.db"), "workspace_id": "ws", "agent_id": "hermes"})
     p.initialize("s", hermes_home=tmp_path, agent_identity="hermes")
-    assert p._config["embedding_base_url"] == "http://127.0.0.1:6660/v1"
+    assert p._config["embedding_base_url"] == ""
+    assert p._config["embedding_model"] == ""
 
 
 def test_pre_compress_checkpoint_is_opt_in(tmp_path):
@@ -32,8 +33,8 @@ def test_stats_only_exposes_visible_buckets(tmp_path):
     json.loads(owner.handle_tool_call("agent_recall_remember", {"content": "shared", "visibility": "shared", "category": "shared_category"}))
     owner.shutdown()
 
-    other = mod.AgentRecallProvider({"db_path": str(tmp_path / "agent-recall.db"), "workspace_id": "ws", "agent_id": "agentforge", "embedding_base_url": "", "embedding_model": "fake"})
-    other.initialize("s2", hermes_home=tmp_path, agent_identity="agentforge")
+    other = mod.AgentRecallProvider({"db_path": str(tmp_path / "agent-recall.db"), "workspace_id": "ws", "agent_id": "other-agent", "embedding_base_url": "", "embedding_model": "fake"})
+    other.initialize("s2", hermes_home=tmp_path, agent_identity="other-agent")
     stats = json.loads(other.handle_tool_call("agent_recall_stats", {}))["stats"]
     categories = {b["category"] for b in stats["buckets"]}
     assert "shared_category" in categories

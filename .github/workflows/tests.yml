@@ -22,7 +22,67 @@ jobs:
         run: python -m pip install -e '.[dev,mcp]'
       - name: Ruff
         run: ruff check .
+      - name: Compile Python surfaces
+        run: python -m py_compile __init__.py hermes_plugin/__init__.py agent_recall_core.py agent_recall_store.py agent_recall_curator.py agent_recall_schemas.py agent_recall_mcp.py agent_recall_bridge.py cli.py scripts/*.py tests/*.py
       - name: Test
         run: python -m pytest
       - name: Test OpenClaw adapter
         run: npm test
+      - name: Synthetic retrieval gate
+        run: python scripts/benchmark_retrieval.py --mode synthetic --gate --json
+
+  package:
+    needs: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.19"
+      - name: Build Python sdist and wheel
+        run: |
+          python -m pip install build check-wheel-contents twine
+          python -m build
+          twine check dist/*.whl dist/*.tar.gz
+          # The distribution intentionally exposes several backward-compatible flat py-modules.
+          check-wheel-contents --ignore W009 dist/*.whl
+      - name: Test extracted source distribution
+        run: |
+          source_smoke="$(mktemp -d)"
+          tar -xzf dist/*.tar.gz -C "$source_smoke"
+          cd "$source_smoke"/agent_recall_hermes_plugin-*
+          python -m pip install '.[dev,mcp]'
+          python -m pytest
+          npm test
+          npm pack --dry-run
+          python scripts/benchmark_retrieval.py --mode synthetic --gate --json
+          rm -rf "$source_smoke"
+      - name: Install and smoke-test wheel in a clean environment
+        run: |
+          wheels=("$PWD"/dist/*.whl)
+          wheel="${wheels[0]}"
+          test -f "$wheel"
+          wheel_smoke="$(mktemp -d)"
+          python -m venv "$wheel_smoke/venv"
+          "$wheel_smoke/venv/bin/python" -m pip install "${wheel}[mcp]"
+          cd "$wheel_smoke"
+          unset PYTHONPATH
+          "$wheel_smoke/venv/bin/python" -c 'import sys, types; agent = types.ModuleType("agent"); memory_provider = types.ModuleType("agent.memory_provider"); memory_provider.MemoryProvider = type("MemoryProvider", (), {}); sys.modules["agent"] = agent; sys.modules["agent.memory_provider"] = memory_provider; import agent_recall_bridge, agent_recall_core, agent_recall_curator, agent_recall_mcp, agent_recall_schemas, agent_recall_store, hermes_plugin; from importlib.resources import files; from pathlib import Path; modules = (agent_recall_bridge, agent_recall_core, agent_recall_curator, agent_recall_mcp, agent_recall_schemas, agent_recall_store, hermes_plugin); assert all(Path(module.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()) for module in modules); assert hasattr(hermes_plugin, "AgentRecallProvider"); assert "name: agent-recall" in files(hermes_plugin).joinpath("plugin.yaml").read_text(encoding="utf-8")'
+          "$wheel_smoke/venv/bin/agent-recall-bridge" --help
+          "$wheel_smoke/venv/bin/agent-recall-mcp" --help
+          rm -rf "$wheel_smoke"
+      - name: Inspect and smoke-test npm package
+        run: |
+          npm pack --dry-run
+          mkdir -p dist/npm
+          archive="$(npm pack --pack-destination dist/npm)"
+          npm_smoke="$(mktemp -d)"
+          tar -xzf "dist/npm/${archive}" -C "$npm_smoke"
+          python "$npm_smoke/package/scripts/install_openclaw_plugin.py" --help
+          node scripts/smoke_packed_openclaw.mjs "$npm_smoke/package"
+          rm -rf "$npm_smoke"
+      - name: Check release diff hygiene
+        run: git diff --check

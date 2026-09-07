@@ -44,11 +44,20 @@ def commands(args: argparse.Namespace) -> list[list[str]]:
     return result
 
 
+def normalized_python_command(value: str) -> str:
+    expanded = Path(value).expanduser()
+    if expanded.is_absolute() or value.startswith("~") or "/" in value or "\\" in value:
+        # Resolving symlinks would turn a venv interpreter into its base Python.
+        return str(expanded.absolute())
+    return value
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    args.python_command = normalized_python_command(args.python_command)
     if not args.dry_run and shutil.which(args.openclaw) is None and not Path(args.openclaw).exists():
         raise SystemExit(f"OpenClaw executable not found: {args.openclaw}")
-    if not args.dry_run and shutil.which(args.python_command) is None and not Path(args.python_command).exists():
+    if not args.dry_run and shutil.which(args.python_command) is None:
         raise SystemExit(f"Python executable not found: {args.python_command}")
     if not args.dry_run:
         config_path = Path(args.config_path).expanduser()

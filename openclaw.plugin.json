@@ -2,7 +2,7 @@
   "id": "agent-recall",
   "name": "AgentRecall",
   "description": "Local-first shared memory with automatic recall and native OpenClaw lifecycle integration",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "kind": "memory",
   "activation": {
     "onStartup": true,

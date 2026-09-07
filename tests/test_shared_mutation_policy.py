@@ -25,7 +25,7 @@ def test_shared_memories_are_readable_but_owner_mutable_by_default(tmp_path):
     added = json.loads(owner.handle_tool_call("agent_recall_remember", {"content": "Shared durable fact", "visibility": "shared"}))
     owner.shutdown()
 
-    other = make_provider(tmp_path, "agentforge")
+    other = make_provider(tmp_path, "other-agent")
     found = json.loads(other.handle_tool_call("agent_recall_search", {"query": "durable fact"}))
     assert found["count"] == 1
 
@@ -40,7 +40,7 @@ def test_shared_mutation_can_be_explicitly_relaxed(tmp_path):
     added = json.loads(owner.handle_tool_call("agent_recall_remember", {"content": "Shared mutable fact", "visibility": "shared"}))
     owner.shutdown()
 
-    other = make_provider(tmp_path, "agentforge", allow_any=True)
+    other = make_provider(tmp_path, "other-agent", allow_any=True)
     update = json.loads(other.handle_tool_call("agent_recall_update", {"id": added["id"], "content": "Collaboratively updated"}))
     assert update["updated"] is True
     found = json.loads(other.handle_tool_call("agent_recall_search", {"query": "Collaboratively"}))

@@ -24,9 +24,53 @@ def test_openclaw_manifest_and_package_declare_native_memory_contract():
     assert package["openclaw"]["extensions"] == ["./openclaw_plugin/index.js"]
     assert package["openclaw"]["compat"]["pluginApi"] == ">=2026.5.22"
     assert "agent_recall_bridge.py" in package["files"]
+    assert "CHANGELOG.md" in package["files"]
+    assert "scripts/install_openclaw_plugin.py" in package["files"]
+    assert "docs/OPENCLAW.md" in package["files"]
+    assert "docs/ARCHITECTURE.md" in package["files"]
+    assert "docs/MCP.md" in package["files"]
     assert "openclaw_plugin/index.js" in package["files"]
     assert "openclaw_plugin/bridge-client.js" in package["files"]
     assert "openclaw_plugin/" not in package["files"]
+    assert "node_modules/agent-recall/scripts/install_openclaw_plugin.py --copy" in (
+        ROOT / "README.md"
+    ).read_text(encoding="utf-8")
+
+
+def test_openclaw_installer_persists_relative_python_path_as_absolute(tmp_path):
+    relative_python = tmp_path / "venv" / "bin" / "python3"
+    relative_python.parent.mkdir(parents=True)
+    relative_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    relative_python.chmod(0o755)
+    process = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "install_openclaw_plugin.py"),
+            "--dry-run",
+            "--python-command",
+            "./venv/bin/python3",
+        ],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert process.returncode == 0, process.stderr
+    commands = [json.loads(line) for line in process.stdout.splitlines()]
+    python_setting = next(command for command in commands if command[3].endswith(".pythonCommand"))
+    assert json.loads(python_setting[4]) == str(relative_python.resolve())
+
+
+def test_openclaw_install_docs_use_the_declared_python3_prerequisite():
+    install_docs = "\n".join(
+        (ROOT / path).read_text(encoding="utf-8") for path in ("README.md", "docs/OPENCLAW.md")
+    )
+
+    assert "\npython scripts/install_openclaw_plugin.py" not in install_docs
+    assert "\npython node_modules/agent-recall/scripts/install_openclaw_plugin.py" not in install_docs
+    assert "python3 scripts/install_openclaw_plugin.py" in install_docs
+    assert "python3 node_modules/agent-recall/scripts/install_openclaw_plugin.py" in install_docs
 
 
 def test_openclaw_installer_is_explicit_about_process_scan_and_conversation_access(tmp_path):

@@ -145,6 +145,8 @@ def build_fastmcp(adapter: MCPAdapter):
         tags: list[str] | None = None,
         importance: float = 0.5,
         confidence: float = 0.8,
+        canonical_key: str = "",
+        expires_at: float = 0.0,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return adapter.call(
@@ -158,6 +160,8 @@ def build_fastmcp(adapter: MCPAdapter):
                 "tags": tags or [],
                 "importance": importance,
                 "confidence": confidence,
+                "canonical_key": canonical_key,
+                "expires_at": expires_at,
                 "metadata": metadata or {},
             },
         )
@@ -232,6 +236,7 @@ def build_fastmcp(adapter: MCPAdapter):
         importance: float | None = None,
         confidence: float | None = None,
         archived: bool | None = None,
+        expires_at: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         values = {"id": id}
@@ -245,6 +250,7 @@ def build_fastmcp(adapter: MCPAdapter):
             "importance": importance,
             "confidence": confidence,
             "archived": archived,
+            "expires_at": expires_at,
             "metadata": metadata,
         }.items():
             if value is not None:

@@ -136,6 +136,29 @@ test("registers the native memory capability, standard tools, and lifecycle hook
   }
 });
 
+test("memory_store exposes canonical upsert and optional expiration across the OpenClaw bridge", async () => {
+  const bridge = createFakeBridge();
+  const api = createFakeApi({ workspaceId: "shared" });
+  createAgentRecallPlugin({ bridgeFactory: () => bridge }).register(api);
+
+  const registration = api.captured.tools.find((entry) =>
+    entry.options.names?.includes("memory_store"),
+  );
+  const tool = registration.factory(hookContext);
+  assert.ok(tool.parameters.properties.canonicalKey);
+  assert.ok(tool.parameters.properties.expiresAt);
+
+  await tool.execute("store-1", {
+    content: "OpenClaw canonical memory",
+    canonicalKey: "openclaw.preference.response_format",
+    expiresAt: 1_900_000_000,
+  });
+
+  const call = bridge.calls.find((item) => item.operation === "remember");
+  assert.equal(call.args.canonical_key, "openclaw.preference.response_format");
+  assert.equal(call.args.expires_at, 1_900_000_000);
+});
+
 test("injects automatic recall through before_prompt_build with host identity", async () => {
   const bridge = createFakeBridge();
   const api = createFakeApi({

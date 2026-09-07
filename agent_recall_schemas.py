@@ -20,6 +20,11 @@ REMEMBER_SCHEMA: dict[str, Any] = {
             "tags": {"type": "array", "items": {"type": "string"}},
             "importance": {"type": "number", "description": "0.0-1.0 importance."},
             "confidence": {"type": "number", "description": "0.0-1.0 confidence."},
+            "canonical_key": {
+                "type": "string",
+                "description": "Optional stable key for in-place upsert/deduplication within this visibility scope.",
+            },
+            "expires_at": {"type": "number", "description": "Optional Unix timestamp after which the memory is hidden/purgeable."},
             "metadata": {"type": "object", "description": "Optional JSON metadata."},
         },
         "required": ["content"],
@@ -73,6 +78,10 @@ UPDATE_SCHEMA: dict[str, Any] = {
             "importance": {"type": "number"},
             "confidence": {"type": "number"},
             "archived": {"type": "boolean"},
+            "expires_at": {
+                "type": "number",
+                "description": "Optional Unix timestamp; use 0 to remove expiration.",
+            },
         },
         "required": ["id"],
     },

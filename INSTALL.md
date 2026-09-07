@@ -26,7 +26,7 @@ hermes memory setup agent-recall
 For another profile:
 
 ```bash
-hermes -p agentforge memory setup agent-recall
+hermes -p coding-agent memory setup agent-recall
 ```
 
 ## Manual config example
@@ -38,8 +38,8 @@ Create or edit `$HERMES_HOME/agent-recall.json`:
   "db_path": "$HERMES_HOME/shared-memory/agent-recall.db",
   "workspace_id": "shared-workspace",
   "agent_id": "hermes",
-  "embedding_base_url": "http://127.0.0.1:6660/v1",
-  "embedding_model": "qwen3-embedding-4b",
+  "embedding_base_url": "http://127.0.0.1:8000/v1",
+  "embedding_model": "your-embedding-model",
   "embedding_api_key_env": "LLM_OPENAI_API_KEY",
   "embedding_dimensions": 0,
   "default_visibility": "agent",
@@ -69,11 +69,13 @@ Create or edit `$HERMES_HOME/agent-recall.json`:
 }
 ```
 
-For AgentForge, use the same `db_path` and `workspace_id`, but set:
+Replace `embedding_base_url` and `embedding_model` with the endpoint and model exposed by your embedding service.
+
+For another trusted profile, use the same `db_path` and `workspace_id`, but set a distinct identity:
 
 ```json
 {
-  "agent_id": "agentforge"
+  "agent_id": "coding-agent"
 }
 ```
 
@@ -83,10 +85,14 @@ Only after you intentionally want to switch the active provider:
 
 ```bash
 hermes config set memory.provider agent-recall
-hermes -p agentforge config set memory.provider agent-recall
+hermes -p coding-agent config set memory.provider agent-recall
 ```
 
 Restart the affected Hermes sessions after changing the active provider.
+
+## Upgrading from v0.2.0
+
+Before changing code, create and verify a SQLite online backup of the active database; do not copy only the main database file while WAL writers may be running. Start one v0.3.0 host first, verify health and recall, and then restart the remaining hosts. The additive migration preserves permanent rows, supports concurrent first-open, and does not run physical cleanup automatically. See the README upgrade section for a backup example and rollback notes.
 
 ## OpenAI-compatible curation
 

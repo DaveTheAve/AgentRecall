@@ -20,7 +20,7 @@ AgentRecallStore + EmbeddingClient + Curator
 SQLite WAL / OpenAI-compatible embedding endpoint / configured chat backend
 ```
 
-`agent_recall_core.py` has no Hermes, OpenClaw, or MCP imports. `__init__.py` is the Hermes compatibility adapter. `agent_recall_mcp.py` imports the MCP SDK only inside `build_fastmcp`, so normal core and Hermes use do not install or load MCP. `openclaw_plugin/` is a native OpenClaw `kind: "memory"` plugin. It keeps one local Python child alive and sends bounded JSONL requests to `agent_recall_bridge.py`, which owns a bounded LRU of core instances keyed by fixed workspace/agent/session identity.
+`agent_recall_core.py` has no Hermes, OpenClaw, or MCP imports. `hermes_plugin/` contains the importable native Hermes adapter and packaged manifest; the root `__init__.py` is a thin source-checkout compatibility wrapper over that same implementation. `agent_recall_mcp.py` imports the MCP SDK only inside `build_fastmcp`, so normal core and Hermes use do not install or load MCP. `openclaw_plugin/` is a native OpenClaw `kind: "memory"` plugin. It keeps one local Python child alive and sends bounded JSONL requests to `agent_recall_bridge.py`, which owns a bounded LRU of core instances keyed by fixed workspace/agent/session identity.
 
 The bridge is deliberately not MCP. MCP stays an optional public API for independent clients; the native OpenClaw path uses OpenClaw's memory capability, standard memory runtime, agent tools, and lifecycle hooks directly.
 
@@ -61,7 +61,14 @@ Shared rows are cross-agent readable but owner-mutated unless `allow_any_agent_t
 
 ## Database compatibility and concurrency
 
-No schema migration is introduced by the multi-host architecture. Existing AgentRecall databases open unchanged.
+The lean retrieval/lifecycle upgrade performs an automatic, backward-compatible migration when a development database first opens:
+
+- `canonical_key TEXT NOT NULL DEFAULT ''` supports in-place durable fact updates;
+- `expires_at REAL NOT NULL DEFAULT 0` keeps memories permanent unless an explicit Unix expiration is supplied;
+- partial unique indexes keep durable canonical facts unique across sessions while retaining per-session uniqueness for `session` visibility;
+- an earlier development index is reconciled by retaining the newest durable canonical row and physically deleting older duplicates plus orphan links.
+
+Existing production databases therefore open without an offline migration step. Run development tests and benchmarks only against SQLite online-backup copies; installing this development tree would migrate the target database on first open.
 
 Each process owns a separate SQLite connection. Connections use:
 
@@ -76,13 +83,15 @@ This supports several host processes sharing one database while SQLite serialize
 
 ## Search and recall
 
-Hybrid ranking is unchanged for normal Hermes calls:
+Hybrid ranking now combines FTS5/BM25 and semantic signals using the tuned deterministic blend:
 
 ```text
-0.58 vector + 0.25 lexical + 0.10 importance + 0.07 recency
+0.25 BM25 rank + 0.15 lexical overlap + 0.55 vector similarity
++ 0.03 importance + 0.02 recency
++ 0.16 exact-all-query-terms lexical boost
 ```
 
-Adapters may request score explanations and richer ACL-safe filters without changing default result ranking. `prefetch_context` adds a character budget and returns a ready-to-inject context block plus a count; MCP callers must explicitly set `include_results=true` when they also need the underlying rows/provenance.
+The final memory ID is the deterministic secondary order for exact score ties. Embedding-free FTS candidate terms use safely quoted prefixes (for example, `postgres` matches `PostgreSQL`); this is prefix matching, not arbitrary substring matching. Embedding-backed queries use whole terms. Retrieval hard-caps the combined Python fusion set at 500 rows after ACL, scalar, and tag filters are applied in SQL. Hybrid search assigns half of that window to BM25 candidates and fills the remainder from a deterministic importance/recency-ordered vector source window; lexical-only or vector-only search can use the full window. Cosine scoring covers the bounded union of lexical and vector-source candidates, so this is approximate semantic retrieval and can miss relevant older/lower-importance memories outside both windows. SQLite may still scan or sort more than 500 rows: the cap is not a database-work or latency guarantee. Explicit search returns at most 50 results. `prefetch_context` may consume the full internal window, deduplicates canonical projections with scope preference `session > agent > shared`, records access only for rows actually appended or truncated into the final character-budgeted context, and returns a ready-to-inject context block plus a count. MCP callers must explicitly set `include_results=true` when they also need the underlying rows/provenance.
 
 ## Extension boundary
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 
 import pytest
 from conftest import FakeEmbedder
@@ -127,6 +128,126 @@ def test_prefetch_context_obeys_budget_and_reports_recall_reasons(tmp_path):
     assert "concise terminal-friendly" in result["context"]
     assert result["results"][0]["score_explanation"]["importance"] == 0.9
     assert core.search({"query": "unrelated", "min_score": 0.99})["results"] == []
+    core.close()
+
+
+def test_prefetch_access_telemetry_only_tracks_rows_injected_within_the_character_budget(tmp_path):
+    core = make_core(tmp_path, agent_id="hermes")
+    query = "bounded telemetry fact"
+    embedding = core.embedder.embed(query)
+    first_id = core.store.add_memory(
+        workspace_id="shared-workspace",
+        agent_id="hermes",
+        content="Bounded telemetry fact one.",
+        embedding=embedding,
+        embedding_model="fake",
+        importance=1.0,
+    )
+    second_id = core.store.add_memory(
+        workspace_id="shared-workspace",
+        agent_id="hermes",
+        content="Bounded telemetry fact two should not fit in the injected context.",
+        embedding=embedding,
+        embedding_model="fake",
+        importance=0.1,
+    )
+    first_only = core.prefetch_context(query, limit=1, max_chars=2_000, track_access=False)
+    injected_id = int(first_only["results"][0]["id"])
+    omitted_id = second_id if injected_id == first_id else first_id
+    result = core.prefetch_context(
+        query,
+        limit=2,
+        max_chars=len(first_only["context"]) + 10,
+        track_access=True,
+    )
+
+    assert str(injected_id) in result["context"]
+    assert str(omitted_id) not in result["context"]
+    accessed = core.store.conn.execute(
+        "SELECT id FROM memories WHERE access_count > 0 ORDER BY id"
+    ).fetchall()
+    assert [row[0] for row in accessed] == [injected_id]
+    core.close()
+
+
+def test_prefetch_negative_limit_clamps_to_one_without_expanding_the_private_window(tmp_path):
+    core = make_core(tmp_path, agent_id="hermes")
+    for index in range(4):
+        core.remember({"content": f"bounded negative limit fact {index}", "category": "preference"})
+
+    result = core.prefetch_context("bounded negative limit fact", limit=-1, max_chars=4_000)
+
+    assert result["count"] == 1
+    accessed = core.store.conn.execute("SELECT COUNT(*) FROM memories WHERE access_count > 0").fetchone()[0]
+    assert accessed == 1
+    core.close()
+
+
+def test_prefetch_context_deduplicates_same_canonical_fact_across_visibility_scopes(tmp_path):
+    core = make_core(tmp_path, agent_id="hermes")
+    for visibility in ("agent", "shared"):
+        core.remember(
+            {
+                "title": "Preferred response format",
+                "content": "The user prefers concise terminal-friendly technical reports.",
+                "visibility": visibility,
+                "canonical_key": "user.preference.response_format",
+            }
+        )
+
+    result = core.prefetch_context("concise terminal reports", limit=6, max_chars=2_000)
+
+    assert result["count"] == 1
+    assert len(result["results"]) == 1
+    assert result["context"].count("concise terminal-friendly") == 1
+    core.close()
+
+
+def test_prefetch_overfetch_keeps_unique_fact_after_many_cross_agent_duplicates(tmp_path):
+    core = make_core(tmp_path, agent_id="hermes")
+    for index in range(55):
+        core.store.add_memory(
+            workspace_id=core.identity.workspace_id,
+            agent_id=f"peer-{index}",
+            source_agent_id=f"peer-{index}",
+            visibility="shared",
+            content=f"target duplicate projection {index}",
+            embedding=[],
+            embedding_model="",
+            canonical_key="shared.target.duplicate",
+        )
+    unique_id = core.store.add_memory(
+        workspace_id=core.identity.workspace_id,
+        agent_id="peer-unique",
+        source_agent_id="peer-unique",
+        visibility="shared",
+        content="target unique supporting fact",
+        embedding=[],
+        embedding_model="",
+        canonical_key="shared.target.unique",
+    )
+
+    result = core.prefetch_context("target duplicate", limit=6, max_chars=4_000)
+
+    assert unique_id in {row["id"] for row in result["results"]}
+    assert result["count"] == 2
+    accessed = core.store.conn.execute("SELECT id FROM memories WHERE access_count > 0 ORDER BY id").fetchall()
+    assert [row[0] for row in accessed] == sorted(row["id"] for row in result["results"])
+    core.close()
+
+
+def test_update_can_clear_optional_expiration_before_it_elapses(tmp_path):
+    core = make_core(tmp_path, agent_id="hermes")
+    memory = core.remember(
+        {
+            "content": "Temporary deployment window",
+            "expires_at": time.time() + 3_600,
+        }
+    )
+
+    assert core.update(memory["id"], {"expires_at": 0})["updated"] is True
+    stored = core.get_memory(memory["id"])["memory"]
+    assert stored["expires_at"] == 0.0
     core.close()
 
 

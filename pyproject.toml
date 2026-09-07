@@ -1,16 +1,20 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "agent-recall-hermes-plugin"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local-first, host-agnostic memory engine with native Hermes, OpenClaw, and MCP adapters"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "David Campbell" }]
 keywords = ["memory", "embeddings", "sqlite", "agents", "hermes-agent", "openclaw", "mcp"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
@@ -21,7 +25,7 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.5"]
+dev = ["pytest>=8.0", "ruff>=0.5", "setuptools>=77"]
 mcp = ["mcp>=1.14,<2"]
 
 [project.scripts]
@@ -29,6 +33,7 @@ agent-recall-mcp = "agent_recall_mcp:main"
 agent-recall-bridge = "agent_recall_bridge:main"
 
 [tool.setuptools]
+packages = ["hermes_plugin"]
 py-modules = [
   "agent_recall_core",
   "agent_recall_curator",
@@ -37,6 +42,9 @@ py-modules = [
   "agent_recall_schemas",
   "agent_recall_store",
 ]
+
+[tool.setuptools.package-data]
+hermes_plugin = ["plugin.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

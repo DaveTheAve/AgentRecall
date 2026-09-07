@@ -53,6 +53,17 @@ Use a distinct agent identity when the client should see only workspace-shared r
 
 Filesystem import is intentionally not exposed through MCP. Remote clients should not receive a general server-local file-reading primitive.
 
+### Canonical keys and expiration
+
+The v0.3 `remember` tool accepts two optional lifecycle fields:
+
+- `canonical_key`: stable identity for an in-place fact update. Durable agent/shared keys span sessions; session-visible keys remain session-specific.
+- `expires_at`: Unix timestamp after which recall hides the row. Omit it or pass `0` for permanent storage.
+
+The `update` tool accepts `expires_at` so a caller can change an expiration or clear it with `0`. Canonical keys are set through `remember`; updating the same key follows the core's atomic add-or-update behavior and does not create revision history.
+
+Physical cleanup is deliberately not exposed through MCP because it hard-deletes expired rows and can compact the database. Run maintenance only through a trusted direct store/administrative process after taking an online backup.
+
 ## Read-only clients
 
 Set either:

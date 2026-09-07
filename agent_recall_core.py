@@ -50,8 +50,8 @@ def default_config(base_dir: str | Path) -> dict[str, Any]:
         "db_path": str(home / "agent-recall.db"),
         "workspace_id": os.environ.get("AGENT_RECALL_WORKSPACE", "hermes"),
         "agent_id": os.environ.get("AGENT_RECALL_AGENT", ""),
-        "embedding_base_url": os.environ.get("AGENT_RECALL_EMBEDDING_BASE_URL", "http://127.0.0.1:6660/v1"),
-        "embedding_model": os.environ.get("AGENT_RECALL_EMBEDDING_MODEL", "qwen3-embedding-4b"),
+        "embedding_base_url": os.environ.get("AGENT_RECALL_EMBEDDING_BASE_URL", ""),
+        "embedding_model": os.environ.get("AGENT_RECALL_EMBEDDING_MODEL", ""),
         "embedding_api_key_env": os.environ.get("AGENT_RECALL_EMBEDDING_API_KEY_ENV", "LLM_OPENAI_API_KEY"),
         "embedding_dimensions": _env_int("AGENT_RECALL_EMBEDDING_DIMENSIONS", 0),
         "embedding_timeout": 20.0,
@@ -334,7 +334,8 @@ class AgentRecallCore:
         if blocked:
             raise AgentRecallError(f"Refusing to store content matching excluded term: {blocked}")
         embedding = self._embedding("\n".join([str(args.get("title") or ""), str(args.get("summary") or ""), content]))
-        memory_id = self.store.add_memory(
+        canonical_key = str(args.get("canonical_key") or "").strip()
+        memory_id, action = self.store.add_memory(
             workspace_id=scope.workspace_id,
             agent_id=scope.agent_id,
             source_agent_id=scope.agent_id,
@@ -351,10 +352,14 @@ class AgentRecallCore:
             embedding_model=str(self.config.get("embedding_model") or ""),
             importance=float(args.get("importance", 0.5)),
             confidence=float(args.get("confidence", 0.8)),
+            canonical_key=canonical_key,
+            expires_at=float(args.get("expires_at") or 0),
+            return_action=True,
         )
         result: dict[str, Any] = {
             "success": True,
             "id": memory_id,
+            "action": action,
             "visibility": visibility,
         }
         if self.last_embedding_error:
@@ -408,6 +413,7 @@ class AgentRecallCore:
         explain: bool = False,
         include_results: bool = True,
         track_access: bool = True,
+        session_id: str | None = None,
     ) -> dict[str, Any]:
         if not query:
             return {
@@ -417,17 +423,43 @@ class AgentRecallCore:
                 "count": 0,
                 "identity": self.identity.as_dict(),
             }
-        result = self.search(
-            {
-                "query": query,
-                "limit": limit or self.config.get("prefetch_limit", 6),
-                "include_shared": self.config.get("shared_recall", True),
-                "explain": explain,
-                "_track_access": track_access,
-            }
+        requested_limit = self.config.get("prefetch_limit", 6) if limit is None else limit
+        context_limit = max(1, min(int(requested_limit), 50))
+        effective_session_id = self.identity.session_id if session_id is None else str(session_id)
+        embedding = self._embedding(query)
+        ranked_rows = self.store.search(
+            workspace_id=self.identity.workspace_id,
+            agent_id=self.identity.agent_id,
+            session_id=effective_session_id,
+            query=query,
+            query_embedding=embedding,
+            include_shared=bool(self.config.get("shared_recall", True)),
+            explain=explain,
+            track_access=False,
+            # Pull a bounded candidate window so canonical duplicates across
+            # many host agents do not crowd unique facts out of the context.
+            # The 500-row hard cap bounds latency/storage scans on large stores.
+            limit=500,
+            _max_limit=500,
         )
-        rows = result["results"]
+        canonical_choices: dict[str, tuple[int, dict[str, Any]]] = {}
+        unkeyed_rows: list[tuple[int, dict[str, Any]]] = []
+        scope_priority = {"shared": 1, "agent": 2, "session": 3}
+        for index, row in enumerate(ranked_rows):
+            canonical_key = str(row.get("canonical_key") or "").strip()
+            if not canonical_key:
+                unkeyed_rows.append((index, row))
+                continue
+            current = canonical_choices.get(canonical_key)
+            if current is None or scope_priority.get(str(row.get("visibility") or ""), 0) > scope_priority.get(
+                str(current[1].get("visibility") or ""), 0
+            ):
+                canonical_choices[canonical_key] = (current[0] if current else index, row)
+        rows = [row for _, row in sorted([*unkeyed_rows, *canonical_choices.values()], key=lambda item: item[0])][
+            :context_limit
+        ]
         lines = ["# AgentRecall Recalled Context"]
+        context_row_ids: list[int] = []
         budget = max(0, int(max_chars if max_chars is not None else self.config.get("max_memory_chars", 12_000)))
         for row in rows:
             scope = f"{row['visibility']}:{row['agent_id']}"
@@ -442,8 +474,12 @@ class AgentRecallCore:
                 remaining = budget - len("\n".join(lines)) - 1
                 if remaining > 20:
                     lines.append(line[:remaining])
+                    context_row_ids.append(int(row["id"]))
                 break
             lines.append(line)
+            context_row_ids.append(int(row["id"]))
+        if context_row_ids and track_access:
+            self.store.record_access(context_row_ids)
         context = "\n".join(lines) if len(lines) > 1 else ""
         return {
             "success": True,
@@ -451,7 +487,7 @@ class AgentRecallCore:
             "results": rows if include_results else [],
             "count": len(rows),
             "identity": self.identity.as_dict(),
-            **({"embedding_warning": result["embedding_warning"]} if "embedding_warning" in result else {}),
+            **({"embedding_warning": self.last_embedding_error} if self.last_embedding_error else {}),
         }
 
     def profile(self, focus: str = "", limit: int = 10, *, track_access: bool = True) -> dict[str, Any]:
@@ -489,9 +525,14 @@ class AgentRecallCore:
         if str(args.get("visibility") or "") == "session" and not self.identity.session_id:
             raise AgentRecallError("Session-scoped memory requires a non-empty session identity")
         updates: dict[str, Any] = {}
-        for key in ["content", "title", "summary", "category", "visibility", "importance", "confidence"]:
+        for key in ["content", "title", "summary", "category", "visibility", "importance", "confidence", "expires_at"]:
             if key in args:
-                updates[key] = normalize_text(str(args[key])) if key == "content" else args[key]
+                if key == "content":
+                    updates[key] = normalize_text(str(args[key]))
+                elif key == "expires_at":
+                    updates[key] = max(0.0, float(args[key] or 0.0))
+                else:
+                    updates[key] = args[key]
         if updates.get("visibility") == "session":
             updates["target_session_id"] = self.identity.session_id
         if "tags" in args:

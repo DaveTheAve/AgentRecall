@@ -28,7 +28,7 @@ def test_shared_memory_visible_but_private_memory_isolated(tmp_path):
 
     results = store.search(
         workspace_id="ws",
-        agent_id="agentforge",
+        agent_id="other-agent",
         session_id="s2",
         query="preference private",
         query_embedding=[1.0, 0.0],
@@ -122,8 +122,8 @@ def test_other_agent_private_memory_cannot_be_updated_or_deleted(tmp_path):
         embedding_model="fake",
     )
 
-    assert store.update_memory(mem_id, "ws", "agentforge", "", content="hacked") is False
-    assert store.delete_memory(mem_id, "ws", "agentforge", "") is False
+    assert store.update_memory(mem_id, "ws", "other-agent", "", content="hacked") is False
+    assert store.delete_memory(mem_id, "ws", "other-agent", "") is False
     visible = store.search(
         workspace_id="ws", agent_id="hermes", session_id="", query="private", query_embedding=[1.0], limit=5
     )

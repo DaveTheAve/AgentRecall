@@ -137,7 +137,8 @@ def test_curator_tool_is_enabled_by_default_and_uses_configured_model(monkeypatc
             seen["text"] = text
             return [{"content": "Curated durable fact", "visibility": default_visibility, "category": "decision"}]
 
-    monkeypatch.setattr(mod, "CodexCliCurator", FakeCurator)
+    implementation = __import__(mod.AgentRecallProvider.__module__, fromlist=["CodexCliCurator"])
+    monkeypatch.setattr(implementation, "CodexCliCurator", FakeCurator)
     p = mod.AgentRecallProvider({
         "db_path": str(tmp_path / "agent-recall.db"),
         "workspace_id": "ws",
@@ -178,7 +179,8 @@ def test_curator_tool_can_use_openai_compatible_backend(monkeypatch, tmp_path):
             seen["text"] = text
             return [{"content": "HTTP curated durable fact", "visibility": default_visibility, "category": "decision"}]
 
-    monkeypatch.setattr(mod, "ChatCompletionsCurator", FakeChatCurator)
+    implementation = __import__(mod.AgentRecallProvider.__module__, fromlist=["ChatCompletionsCurator"])
+    monkeypatch.setattr(implementation, "ChatCompletionsCurator", FakeChatCurator)
     monkeypatch.setenv("AGENT_RECALL_TEST_CHAT_KEY", "test-key")
     p = mod.AgentRecallProvider({
         "db_path": str(tmp_path / "agent-recall.db"),
@@ -234,7 +236,8 @@ def test_curator_tool_can_store_candidates_from_fake_codex(monkeypatch, tmp_path
         def curate(self, text, *, default_visibility):
             return [{"content": "Curated durable fact", "visibility": default_visibility, "category": "decision"}]
 
-    monkeypatch.setattr(mod, "CodexCliCurator", FakeCurator)
+    implementation = __import__(mod.AgentRecallProvider.__module__, fromlist=["CodexCliCurator"])
+    monkeypatch.setattr(implementation, "CodexCliCurator", FakeCurator)
     p = mod.AgentRecallProvider({
         "db_path": str(tmp_path / "agent-recall.db"),
         "workspace_id": "ws",
