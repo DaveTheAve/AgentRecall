@@ -2,9 +2,9 @@
 
 AgentRecall is a native OpenClaw memory plugin. It uses OpenClaw's exclusive memory slot and lifecycle APIs directly; MCP is optional and is not the adapter's internal transport.
 
-## Verified OpenClaw surfaces
+## OpenClaw surfaces
 
-This adapter was loader-tested against the locally installed OpenClaw `2026.5.22` and the current npm release `2026.7.1-2`, while checking the current OpenClaw documentation on August 18, 2026. It uses these public surfaces:
+The adapter uses these public OpenClaw surfaces:
 
 - native `openclaw.plugin.json` manifest with `kind: "memory"`;
 - `registerMemoryCapability` for memory prompt guidance and the standard memory runtime;
@@ -43,7 +43,7 @@ This bridge is not MCP, does not listen on a socket, and does not expose a netwo
 
 ## Install
 
-Prerequisites: OpenClaw `>=2026.5.22`, Node.js `>=22.19`, and Python `>=3.10` available as `python3` (or set plugin `pythonCommand`). Create the JSON file passed to `--config-path` before installation; explicit adapter config paths fail closed when missing or malformed.
+Prerequisites: OpenClaw `>=2026.5.22` as declared by the package metadata, a Node.js version supported by that OpenClaw release, and Python `>=3.10` available as `python3` (or set plugin `pythonCommand`). Create the JSON file passed to `--config-path` before installation; explicit adapter config paths fail closed when missing or malformed.
 
 From this repository:
 

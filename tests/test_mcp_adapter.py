@@ -94,6 +94,7 @@ def test_configured_mcp_adapter_constructs_the_host_neutral_curator(tmp_path, mo
         config_path=str(config_path),
         workspace_id="ws",
         agent_id="mcp-client",
+        access="read-write",
     )
 
     result = adapter.call("curate", {"text": "durable MCP fact", "dry_run": False})
@@ -112,9 +113,9 @@ def test_mcp_does_not_disclose_server_filesystem_paths_or_session_ids(tmp_path):
             "metadata": {"source_path": "/home/service/private/secret.md"},
         },
     )
-    found = adapter.call("search", {"query": "private provenance", "include_results": True})["results"][0]
+    found = adapter.call("search", {"query": "private provenance"})["results"][0]
     assert "session_id" not in found
-    assert found["metadata"]["source_path"] == "[redacted]"
+    assert "source_path" not in found["metadata"]
     assert "db_path" not in adapter.call("profile", {})
     assert "db_path" not in adapter.call("stats", {})["stats"]
     assert "db_path" not in adapter.call("health", {})["sqlite"]

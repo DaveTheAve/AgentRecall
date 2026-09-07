@@ -24,6 +24,12 @@ classifiers = [
 ]
 dependencies = []
 
+[project.urls]
+Homepage = "https://github.com/DaveTheAve/AgentRecall"
+Repository = "https://github.com/DaveTheAve/AgentRecall"
+Documentation = "https://github.com/DaveTheAve/AgentRecall#readme"
+Issues = "https://github.com/DaveTheAve/AgentRecall/issues"
+
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.5", "setuptools>=77"]
 mcp = ["mcp>=1.14,<2"]
@@ -39,6 +45,9 @@ py-modules = [
   "agent_recall_curator",
   "agent_recall_bridge",
   "agent_recall_mcp",
+  "agent_recall_mcp_contracts",
+  "agent_recall_mcp_runtime",
+  "agent_recall_session_archive",
   "agent_recall_schemas",
   "agent_recall_store",
 ]

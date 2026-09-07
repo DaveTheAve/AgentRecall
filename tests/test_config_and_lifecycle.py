@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from pathlib import Path
 
 import pytest
 from conftest import FakeEmbedder, load_provider_module
@@ -110,3 +111,70 @@ def test_reinitialize_closes_the_previous_core_connection(tmp_path):
     with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
         previous.store.conn.execute("SELECT 1")
     p.shutdown()
+
+
+def _provider(tmp_path, **overrides):
+    mod = load_provider_module()
+    provider = mod.AgentRecallProvider(
+        {
+            "db_path": str(tmp_path / "agent-recall.db"),
+            "embedding_base_url": "",
+            **overrides,
+        }
+    )
+    provider.initialize("session-one", hermes_home=tmp_path, agent_identity="hermes")
+    return provider
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def test_archive_prompt_remains_separate_without_learning_preview(tmp_path):
+    provider = _provider(tmp_path, session_archive_enabled=True)
+    try:
+        prompt = provider.system_prompt_block()
+        assert "SessionArchive is a separate, read-only source owned by the current Hermes profile." in prompt
+        assert "learning" not in prompt.lower()
+        assert "preview" not in prompt.lower()
+    finally:
+        provider.shutdown()
+
+
+def test_config_schema_uses_only_hermes_supported_types():
+    mod = load_provider_module()
+    supported_types = {"text", "integer", "number", "boolean"}
+    invalid_types = {
+        field["key"]: field["type"]
+        for field in mod.AgentRecallProvider().get_config_schema()
+        if "type" in field and field["type"] not in supported_types
+    }
+
+    assert invalid_types == {}
+
+
+
+
+
+
+def test_both_hermes_manifests_omit_unsupported_session_end_hook():
+    root = Path(__file__).resolve().parents[1]
+    for manifest in (root / "plugin.yaml", root / "hermes_plugin" / "plugin.yaml"):
+        hooks = {
+            line.removeprefix("  - ").strip()
+            for line in manifest.read_text(encoding="utf-8").splitlines()
+            if line.startswith("  - ")
+        }
+        assert "on_session_end" not in hooks

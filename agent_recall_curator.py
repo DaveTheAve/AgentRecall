@@ -1,28 +1,57 @@
 from __future__ import annotations
 
 import json
+import math
+import os
+import stat
 import subprocess
 import tempfile
 import urllib.request
 from pathlib import Path
 from typing import Any
 
+MAX_CURATION_RESPONSE_CHARS = 128_000
+MAX_CURATION_TRANSPORT_BYTES = 512_000
+MAX_CURATED_MEMORIES = 32
+MAX_CURATED_CONTENT_CHARS = 1_200
+MAX_CURATED_TAGS = 16
+MAX_CURATED_METADATA_BYTES = 4_096
+MAX_CURATED_METADATA_PROPERTIES = 32
+_OPTIONAL_STRING_LIMITS = {
+    "title": 200,
+    "summary": 500,
+    "category": 80,
+    "canonical_key_hint": 256,
+}
+_MAX_CURATED_TAG_CHARS = 64
+
 CURATION_SCHEMA = {
     "type": "object",
     "properties": {
         "memories": {
             "type": "array",
+            "maxItems": MAX_CURATED_MEMORIES,
             "items": {
                 "type": "object",
                 "properties": {
-                    "content": {"type": "string"},
-                    "title": {"type": "string"},
-                    "summary": {"type": "string"},
+                    "content": {"type": "string", "maxLength": MAX_CURATED_CONTENT_CHARS},
+                    "title": {"type": "string", "maxLength": _OPTIONAL_STRING_LIMITS["title"]},
+                    "summary": {"type": "string", "maxLength": _OPTIONAL_STRING_LIMITS["summary"]},
                     "visibility": {"type": "string", "enum": ["agent", "shared", "session"]},
-                    "category": {"type": "string"},
-                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "category": {"type": "string", "maxLength": _OPTIONAL_STRING_LIMITS["category"]},
+                    "tags": {
+                        "type": "array",
+                        "maxItems": MAX_CURATED_TAGS,
+                        "items": {"type": "string", "maxLength": _MAX_CURATED_TAG_CHARS},
+                    },
                     "importance": {"type": "number"},
-                    "confidence": {"type": "number"}
+                    "confidence": {"type": "number"},
+                    "metadata": {"type": "object", "maxProperties": MAX_CURATED_METADATA_PROPERTIES},
+                    "canonical_key_hint": {
+                        "type": "string",
+                        "maxLength": _OPTIONAL_STRING_LIMITS["canonical_key_hint"],
+                        "description": "Optional stable topical hint; never an authoritative persistence key",
+                    },
                 },
                 "required": ["content"]
             }
@@ -32,31 +61,62 @@ CURATION_SCHEMA = {
 }
 
 
-def _as_number(value: Any, default: float) -> float:
-    try:
-        return max(0.0, min(float(value), 1.0))
-    except Exception:
+def _candidate_number(item: dict[str, Any], key: str, default: float) -> float | None:
+    if key not in item:
         return default
+    value = item[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        parsed = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return max(0.0, min(parsed, 1.0)) if math.isfinite(parsed) else None
 
 
 def _clean_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
     content = item.get("content")
-    if not isinstance(content, str) or not content.strip():
+    if not isinstance(content, str) or not content.strip() or len(content) > MAX_CURATED_CONTENT_CHARS:
         return None
     cleaned: dict[str, Any] = {"content": content.strip()}
-    for key in ["title", "summary", "category"]:
-        value = item.get(key)
-        if isinstance(value, str) and value.strip():
+    for key, max_chars in _OPTIONAL_STRING_LIMITS.items():
+        if key not in item:
+            continue
+        value = item[key]
+        if not isinstance(value, str) or len(value) > max_chars:
+            return None
+        if value.strip():
             cleaned[key] = value.strip()
-    visibility = item.get("visibility")
-    cleaned["visibility"] = visibility if visibility in {"agent", "shared", "session"} else "agent"
-    tags = item.get("tags")
-    cleaned["tags"] = [t.strip() for t in tags if isinstance(t, str) and t.strip()] if isinstance(tags, list) else []
-    cleaned["importance"] = _as_number(item.get("importance"), 0.5)
-    cleaned["confidence"] = _as_number(item.get("confidence"), 0.8)
+    if "visibility" in item:
+        visibility = item["visibility"]
+        if not isinstance(visibility, str) or visibility not in {"agent", "shared", "session"}:
+            return None
+    cleaned["visibility"] = item.get("visibility", "agent")
+    tags = item.get("tags", [])
+    if not isinstance(tags, list) or len(tags) > MAX_CURATED_TAGS:
+        return None
+    cleaned_tags: list[str] = []
+    for tag in tags:
+        if not isinstance(tag, str) or not tag.strip() or len(tag) > _MAX_CURATED_TAG_CHARS:
+            return None
+        cleaned_tags.append(tag.strip())
+    cleaned["tags"] = cleaned_tags
+    importance = _candidate_number(item, "importance", 0.5)
+    confidence = _candidate_number(item, "confidence", 0.8)
+    if importance is None or confidence is None:
+        return None
+    cleaned["importance"] = importance
+    cleaned["confidence"] = confidence
     metadata = item.get("metadata")
+    if "metadata" in item and not isinstance(metadata, dict):
+        return None
     if isinstance(metadata, dict):
-        cleaned["metadata"] = metadata
+        serialized_metadata = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+        if (
+            len(metadata) <= MAX_CURATED_METADATA_PROPERTIES
+            and len(serialized_metadata.encode("utf-8")) <= MAX_CURATED_METADATA_BYTES
+        ):
+            cleaned["metadata"] = metadata
     return cleaned
 
 
@@ -65,7 +125,9 @@ def parse_curation_json(text: str) -> list[dict[str, Any]]:
 
     Accepts either raw JSON or JSON surrounded by prose/code fences.
     """
-    raw = (text or "").strip()
+    if not isinstance(text, str) or len(text) > MAX_CURATION_RESPONSE_CHARS:
+        return []
+    raw = text.strip()
     if not raw:
         return []
     candidates = [raw]
@@ -85,7 +147,7 @@ def parse_curation_json(text: str) -> list[dict[str, Any]]:
         if not isinstance(memories, list):
             continue
         cleaned: list[dict[str, Any]] = []
-        for item in memories:
+        for item in memories[:MAX_CURATED_MEMORIES]:
             if isinstance(item, dict):
                 candidate = _clean_candidate(item)
                 if candidate:
@@ -96,11 +158,12 @@ def parse_curation_json(text: str) -> list[dict[str, Any]]:
 
 def build_curation_prompt(text: str, *, default_visibility: str = "agent") -> str:
     return f"""You extract durable AI-agent memories. Return ONLY JSON matching this schema:
-{{"memories":[{{"content":"durable fact", "title":"short", "summary":"optional", "visibility":"agent|shared|session", "category":"user_pref|project|environment|decision|procedure|general", "tags":["tag"], "importance":0.0, "confidence":0.0}}]}}
+{{"memories":[{{"content":"durable fact", "title":"short", "summary":"optional", "visibility":"agent|shared|session", "category":"user_pref|project|environment|decision|procedure|general", "tags":["tag"], "importance":0.0, "confidence":0.0, "canonical_key_hint":"optional.stable.topic"}}]}}
 
 Rules:
 - Keep only durable facts useful after this conversation.
 - Do not store secrets, credentials, command output dumps, or transient progress.
+- canonical_key_hint is an optional stable topical hint and is NOT authoritative; persistence assigns safe keys.
 - Use visibility='{default_visibility}' unless the text explicitly says the fact is useful across agents, then use 'shared'.
 - If there is nothing durable, return {{"memories":[]}}.
 
@@ -142,7 +205,10 @@ class ChatCompletionsCurator:
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310 - user-configured endpoint
-            payload = json.loads(resp.read().decode("utf-8"))
+            response_bytes = resp.read(MAX_CURATION_TRANSPORT_BYTES + 1)
+            if len(response_bytes) > MAX_CURATION_TRANSPORT_BYTES:
+                raise RuntimeError("chat curator response exceeds transport limit")
+            payload = json.loads(response_bytes.decode("utf-8"))
         message = payload.get("choices", [{}])[0].get("message", {})
         content = message.get("content") if isinstance(message, dict) else ""
         if not isinstance(content, str):
@@ -170,24 +236,60 @@ class CodexCliCurator:
             out = Path(td) / "codex-memory.json"
             cmd = [
                 self.command,
+                "--ask-for-approval",
+                "never",
                 "exec",
                 "--model",
                 self.model,
                 "--sandbox",
                 "read-only",
-                "--ask-for-approval",
-                "never",
                 "--skip-git-repo-check",
                 "--ephemeral",
                 "--output-last-message",
                 str(out),
-                prompt,
+                "-",
             ]
             try:
-                proc = subprocess.run(cmd, text=True, capture_output=True, timeout=self.timeout, check=False)
+                proc = subprocess.run(
+                    cmd,
+                    input=prompt,
+                    text=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=self.timeout,
+                    check=False,
+                )
             except subprocess.TimeoutExpired as exc:
                 raise RuntimeError(f"codex curator timed out after {exc.timeout} seconds") from None
+            except (OSError, ValueError):
+                raise RuntimeError("codex curator failed to start") from None
             if proc.returncode != 0:
                 raise RuntimeError(f"codex curator failed with exit code {proc.returncode}")
-            response = out.read_text(encoding="utf-8") if out.exists() else proc.stdout
+            try:
+                flags = os.O_RDONLY
+                flags |= getattr(os, "O_CLOEXEC", 0)
+                flags |= getattr(os, "O_NONBLOCK", 0)
+                flags |= getattr(os, "O_NOFOLLOW", 0)
+                fd = os.open(out, flags)
+                try:
+                    if not stat.S_ISREG(os.fstat(fd).st_mode):
+                        raise RuntimeError("codex curator output unavailable or invalid")
+                    response_bytes = bytearray()
+                    while len(response_bytes) <= MAX_CURATION_TRANSPORT_BYTES:
+                        chunk = os.read(
+                            fd,
+                            MAX_CURATION_TRANSPORT_BYTES + 1 - len(response_bytes),
+                        )
+                        if not chunk:
+                            break
+                        response_bytes.extend(chunk)
+                finally:
+                    os.close(fd)
+                if len(response_bytes) > MAX_CURATION_TRANSPORT_BYTES:
+                    raise RuntimeError("codex curator output unavailable or invalid")
+                response = response_bytes.decode("utf-8")
+            except RuntimeError:
+                raise
+            except (OSError, UnicodeError):
+                raise RuntimeError("codex curator output unavailable or invalid") from None
         return parse_curation_json(response)

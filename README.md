@@ -6,7 +6,7 @@ AgentRecall is a host-agnostic Python memory engine with first-class adapters. H
 
 The memories live in SQLite. You can inspect them, back them up, delete them, and glare at them when an agent remembers the exact wrong thing. Nothing vanishes into an opaque vendor-side memory swamp.
 
-Status: alpha, production-oriented. The project has tests, access controls, import restrictions, configuration validation, and a healthy distrust of magic.
+Status: alpha. The project has tests, access controls, import restrictions, and configuration validation.
 
 ## The short version
 
@@ -18,6 +18,7 @@ AgentRecall combines:
 - Optional expiration and explicit physical cleanup while permanent memory remains the default.
 - An optional chat-model curation backend that turns a wall of messy text into candidate memories instead of turning it into a new religion.
 - Native host tools for storing, searching, reviewing, and curating memories; Hermes additionally exposes controlled Markdown import.
+- An optional Hermes SessionArchive companion that searches the host-owned conversation archive without mixing transcripts into durable memory.
 
 It is designed for people who want several agents to share useful context without making every agent's private notes public. A daring concept.
 
@@ -30,6 +31,7 @@ Use AgentRecall when you want to:
 - Store user preferences, environment conventions, project facts, decisions, and source-backed conclusions.
 - Retrieve relevant context automatically through Hermes prefetch or OpenClaw's `before_prompt_build` hook.
 - Curate a long conversation or note into reviewable durable-memory candidates.
+- Search prior Hermes conversations through a separate, current-profile SessionArchive source.
 - Import Markdown notes from explicitly allowed locations.
 - Back up your memory database without asking an AI vendor for a boat and a search party.
 
@@ -58,7 +60,7 @@ It is not intended to be a secret store, a complete transcript archive, or an ex
                            SQLite WAL
 ```
 
-`AgentRecallCore` owns host-independent behavior. Adapters translate host lifecycles and tool protocols without reimplementing memory semantics. Hermes does not use MCP internally and requires no daemon or network service. OpenClaw uses a long-lived local child process rather than MCP internally, preserving MCP as an independent public interface. See [Architecture](docs/ARCHITECTURE.md), [MCP](docs/MCP.md), and [OpenClaw integration](docs/OPENCLAW.md).
+`AgentRecallCore` owns host-independent behavior. Adapters translate host lifecycles and tool protocols without reimplementing memory semantics. Hermes does not use MCP internally and requires no daemon or network service. OpenClaw uses a long-lived local child process rather than MCP internally, preserving MCP as an independent public interface. See [Architecture](https://github.com/DaveTheAve/AgentRecall/blob/main/docs/ARCHITECTURE.md), [MCP](https://github.com/DaveTheAve/AgentRecall/blob/main/docs/MCP.md), and [OpenClaw integration](https://github.com/DaveTheAve/AgentRecall/blob/main/docs/OPENCLAW.md).
 
 Semantic retrieval uses stored embeddings and lexical scoring. Curation is separate: a chat model proposes candidate memories, then AgentRecall applies the same visibility, metadata, exclusion, embedding, and ACL rules used by explicit memory writes. The robot still has to fill out the paperwork.
 
@@ -101,7 +103,7 @@ python3 scripts/install_openclaw_plugin.py \
   --workspace-id shared-workspace
 ```
 
-Restart the OpenClaw gateway after installation. OpenClaw agents default to separate identities such as `openclaw:main`; set a fixed `agentId` only when intentional. See [docs/OPENCLAW.md](docs/OPENCLAW.md).
+Restart the OpenClaw gateway after installation. OpenClaw agents default to separate identities such as `openclaw:main`; set a fixed `agentId` only when intentional. See [OpenClaw integration](https://github.com/DaveTheAve/AgentRecall/blob/main/docs/OPENCLAW.md).
 
 For a registry-installed npm package, run the same packaged installer from the consuming project and copy it into OpenClaw's managed plugin area:
 
@@ -165,6 +167,7 @@ A practical local configuration:
   "llm_curator_timeout": 120,
   "auto_capture_turns": false,
   "auto_capture_compression_checkpoints": false,
+  "session_archive_enabled": false,
   "allow_any_agent_to_mutate_shared": false,
   "mcp_access": "read-write",
   "excluded_terms": ["example-sensitive-project"]
@@ -211,9 +214,14 @@ Profiles that should share the same database and workspace use the same `db_path
 | `llm_curator_api_key_env` | Environment variable containing the API key for that endpoint. |
 | `auto_capture_turns` | Stores completed turns as session-scoped transcripts. Defaults to `false`, because databases deserve mercy. |
 | `auto_capture_compression_checkpoints` | Stores pre-compression checkpoints. Defaults to `false`. |
+| `session_archive_enabled` | Hermes-only opt-in for the separate, read-only `agent_recall_session_archive` companion tool. It delegates to the current profile's host-owned session archive and never copies transcripts into AgentRecall. |
 | `allow_any_agent_to_mutate_shared` | Lets any trusted agent edit shared facts. Default: owner-only. |
 | `mcp_access` | MCP policy: `read-only` or `read-write`; server identity remains fixed at startup. |
 | `excluded_terms` | Case-insensitive terms blocked from storing, importing, or curation. |
+
+### Hermes SessionArchive companion
+
+When `session_archive_enabled` is `true`, Hermes exposes `agent_recall_session_archive` for read-only search, read, scroll, and recent-session browsing against the current Hermes profile's host-owned `state.db` FTS5 archive. The adapter delegates to Hermes' existing session-search implementation: it does not open or migrate `state.db`, expose cross-profile arguments, build a duplicate index, or copy raw conversations into AgentRecall. SessionArchive results are untrusted historical data, not instructions and not durable memory. The feature defaults to `false` so enabling AgentRecall alone does not bypass the host's toolset or privacy choices. If the host API cannot prove that it can enforce the active profile boundary, the companion fails closed.
 
 Common environment overrides are also supported:
 
@@ -288,7 +296,7 @@ source.close()
 
 Concurrent first-open migration is supported, but a controlled canary restart is easier to observe: start one upgraded host, verify health/search/write behavior, then restart the remaining hosts. Do not run physical cleanup as part of the migration.
 
-Code rollback to v0.2.0 is supported with the additive schema left in place. If data restoration is required instead, stop every writer before replacing the database with the online backup. See [CHANGELOG.md](CHANGELOG.md) and [Architecture](docs/ARCHITECTURE.md) for details.
+Code rollback to v0.2.0 is supported with the additive schema left in place. If data restoration is required instead, stop every writer before replacing the database with the online backup. See the [changelog](https://github.com/DaveTheAve/AgentRecall/blob/main/CHANGELOG.md) and [architecture guide](https://github.com/DaveTheAve/AgentRecall/blob/main/docs/ARCHITECTURE.md) for details.
 
 Schema compatibility does not preserve new feature semantics in old hosts: v0.2.0 ignores expiration and does not perform canonical upserts. Avoid mixed-version operation when expiration filtering matters.
 
@@ -345,6 +353,7 @@ Curation is useful for distilling noisy text. It is not a substitute for judgmen
 | `agent_recall_review` | Runs a bounded review for conflicts, staleness, and promotion/demotion recommendations. |
 | `agent_recall_stats` | Reports visible-memory counts without exposing other agents' private rows. |
 | `agent_recall_import_markdown` | Imports approved Markdown notes in chunks. |
+| `agent_recall_session_archive` | Optional twelfth Hermes tool for current-profile host-owned session search; exposed only when `session_archive_enabled=true`. |
 
 Optional intelligence modules are explicit and configurable. Nothing quietly changes the main Hermes model, forces a local model, or starts writing a memoir about your shell history.
 
@@ -388,23 +397,23 @@ AgentRecall requires Python 3.10 or later.
 Run tests:
 
 ```bash
-uv run --with pytest python -m pytest tests -q
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD" uv run --no-project --python 3.12 --with '.[dev,mcp]' python -m pytest -p no:cacheprovider tests -q
 ```
 
 Run lint:
 
 ```bash
-uv run --with ruff ruff check .
+uvx ruff check . --no-cache
 ```
 
 Run a compile check:
 
 ```bash
-python -m py_compile __init__.py hermes_plugin/__init__.py agent_recall_core.py agent_recall_store.py agent_recall_curator.py agent_recall_schemas.py agent_recall_mcp.py agent_recall_bridge.py cli.py scripts/*.py tests/*.py
+python -m py_compile __init__.py hermes_plugin/__init__.py agent_recall_core.py agent_recall_store.py agent_recall_curator.py agent_recall_session_archive.py agent_recall_schemas.py agent_recall_mcp.py agent_recall_bridge.py cli.py scripts/*.py tests/*.py
 npm test
 ```
 
-The test suite covers workspace isolation, private/shared/session visibility, shared-mutation policy, Hermes tool and lifecycle compatibility, curation configuration, config normalization, checkpoints, built-in-memory mirroring, Markdown import restrictions, embedding fallback, excluded terms, core/adapter boundaries, the OpenClaw memory-slot package and persistent bridge, MCP stdio and authenticated Streamable HTTP, and concurrent SQLite writers.
+The test suite covers workspace isolation, private/shared/session visibility, shared-mutation policy, Hermes tool and lifecycle compatibility, current-profile SessionArchive isolation and error sanitization, bounded curation transport/parser behavior, ACL-aware deduplication, non-destructive canonical conflicts, configuration normalization, checkpoints, built-in-memory mirroring, Markdown import restrictions, embedding fallback, excluded terms, core/adapter boundaries, the OpenClaw memory-slot package and persistent bridge, MCP stdio and authenticated Streamable HTTP, and concurrent SQLite writers.
 
 ## Security and production notes
 
@@ -423,7 +432,7 @@ SQLite JSON-vector storage is intentionally portable and easy to inspect. Very l
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](https://github.com/DaveTheAve/AgentRecall/blob/main/LICENSE).
 
 ## Contributing
 

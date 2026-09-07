@@ -1,347 +1,206 @@
 from __future__ import annotations
 
 import argparse
-import hmac
+import json
 import os
 from pathlib import Path
 from typing import Any
 
 try:
     from .agent_recall_core import AgentIdentity, AgentRecallCore, build_curator, load_config
+    from .agent_recall_mcp_contracts import (
+        ERRORS,
+        INPUT_SCHEMAS,
+        OUTPUT_SCHEMAS,
+        MCPAccessError,
+        MCPPublicError,
+        public_result,
+        validate_arguments,
+    )
+    from .agent_recall_mcp_runtime import BoundedRuntime, HTTPBoundary, run_stdio
 except ImportError:
     from agent_recall_core import AgentIdentity, AgentRecallCore, build_curator, load_config
-
-
-class MCPAccessError(PermissionError):
-    pass
-
-
-def _sanitize_public(value: Any) -> Any:
-    if isinstance(value, list):
-        return [_sanitize_public(item) for item in value]
-    if not isinstance(value, dict):
-        return value
-    result: dict[str, Any] = {}
-    for key, item in value.items():
-        normalized = key.lower().replace("_", "")
-        if normalized in {"dbpath", "sessionid"}:
-            continue
-        if normalized.endswith("path") and isinstance(item, str) and os.path.isabs(item):
-            result[key] = "[redacted]"
-        else:
-            result[key] = _sanitize_public(item)
-    return result
+    from agent_recall_mcp_contracts import (
+        ERRORS,
+        INPUT_SCHEMAS,
+        OUTPUT_SCHEMAS,
+        MCPAccessError,
+        MCPPublicError,
+        public_result,
+        validate_arguments,
+    )
+    from agent_recall_mcp_runtime import BoundedRuntime, HTTPBoundary, run_stdio
 
 
 class MCPAdapter:
-    """Curated public AgentRecall API for MCP and other tool transports."""
-
-    READ_TOOLS = {
-        "search",
-        "prefetch_context",
-        "get_memory",
-        "profile",
-        "stats",
-        "health",
-        "capabilities",
-    }
-    WRITE_TOOLS = {
-        "remember",
-        "update",
-        "forget",
-        "curate",
-        "conclude",
-        "profile_synthesize",
-        "review",
-    }
+    """Fixed-identity public boundary. No caller-controlled identity routing."""
+    READ_TOOLS = {"search", "prefetch_context", "get_memory", "profile", "stats", "health", "capabilities"}
+    WRITE_TOOLS = {"remember", "update", "forget", "curate", "conclude", "profile_synthesize", "review"}
     TOOLS = tuple(sorted(READ_TOOLS | WRITE_TOOLS))
 
-    def __init__(self, core: AgentRecallCore, *, access: str = "read-write") -> None:
+    def __init__(self, core: AgentRecallCore, *, access="read-only", tools=None):
         if access not in {"read-only", "read-write"}:
-            raise ValueError("MCP access must be 'read-only' or 'read-write'")
+            raise ValueError("Invalid MCP access policy")
+        if tools is not None and (not isinstance(tools, (list, tuple, set, frozenset)) or
+                                  any(type(name) is not str or name not in self.TOOLS for name in tools)):
+            raise ValueError("Invalid MCP tool allowlist")
         self.core = core
-        self.access = access
+        self._access = access
+        self._tools = frozenset(self.TOOLS if tools is None else tools) & (
+            self.READ_TOOLS if access == "read-only" else set(self.TOOLS))
+        self.runtime = None
+        self._closed = False
+        # Startup snapshot, not an on-demand SQLite lock acquisition.
+        try:
+            self._health = public_result("health", {**core.health(), "snapshot": True})
+        except Exception:
+            self._health = {"success": False, "snapshot": True, "sqlite": {"quick_check": "unavailable"}}
 
-    def _authorize(self, operation: str) -> None:
-        if operation not in self.TOOLS:
-            raise KeyError(f"Unknown AgentRecall MCP operation: {operation}")
-        if self.access == "read-only" and operation in self.WRITE_TOOLS:
-            raise MCPAccessError(f"AgentRecall MCP client is read-only; operation {operation!r} is not allowed")
+    @property
+    def access(self):
+        return self._access
+
+    @property
+    def tools(self):
+        return tuple(sorted(self._tools))
+
+    def _authorize(self, operation):
+        if type(operation) is not str or operation not in self._tools:
+            raise MCPAccessError()
+        if self._closed:
+            raise MCPPublicError("closed")
+
+    def prepare(self, operation, args=None):
+        self._authorize(operation)
+        return validate_arguments(operation, args)
 
     def call(self, operation: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
+        values = self.prepare(operation, args)
+        return self._execute(operation, values)
+
+    def _execute(self, operation, values):
         self._authorize(operation)
-        values = dict(args or {})
-        track_access = self.access != "read-only"
-        if operation == "remember":
-            result = self.core.remember(values)
-        elif operation == "search":
-            values["_track_access"] = track_access
-            result = self.core.search(values)
-        elif operation == "prefetch_context":
-            result = self.core.prefetch_context(
-                str(values.get("query") or ""),
-                limit=int(values.get("limit") or self.core.config.get("prefetch_limit", 6)),
-                max_chars=int(values.get("max_chars") or self.core.config.get("max_memory_chars", 12_000)),
-                explain=bool(values.get("explain", True)),
-                include_results=bool(values.get("include_results", False)),
-                track_access=track_access,
-            )
-        elif operation == "get_memory":
-            result = self.core.get_memory(
-                int(values["id"]),
-                include_shared=bool(values.get("include_shared", True)),
-            )
-        elif operation == "profile":
-            result = self.core.profile(
-                str(values.get("focus") or ""),
-                int(values.get("limit") or 10),
-                track_access=track_access,
-            )
-        elif operation == "stats":
-            result = self.core.stats()
-        elif operation == "health":
-            result = self.core.health()
-        elif operation == "capabilities":
-            result = self.core.capabilities()
-            result.update({"access": self.access, "tools": list(self.TOOLS)})
-        elif operation == "update":
-            result = self.core.update(int(values["id"]), values)
-        elif operation == "forget":
-            result = self.core.forget(int(values["id"]))
-        elif operation == "curate":
-            result = self.core.curate(values)
-        elif operation == "conclude":
-            result = self.core.conclude(values)
-        elif operation == "profile_synthesize":
-            result = self.core.profile_synthesize(values)
-        elif operation == "review":
-            result = self.core.review(values)
+        try:
+            track = self.access != "read-only"
+            if operation == "search":
+                result = self.core.search({**values, "_track_access": track})
+            elif operation == "prefetch_context":
+                result = self.core.prefetch_context(**values, track_access=track)
+            elif operation == "get_memory":
+                result = self.core.get_memory(values["id"], include_shared=values.get("include_shared", True))
+            elif operation == "profile":
+                result = self.core.profile(**values, track_access=track)
+            elif operation == "stats":
+                result = self.core.stats()
+            elif operation == "health":
+                result = {**self._health}
+                if self.runtime:
+                    result["runtime"] = self.runtime.status()
+            elif operation == "capabilities":
+                result = self.core.capabilities()
+                result.update({"access": self.access, "tools": list(self.tools), "operations": list(self.tools)})
+                feature_tools = {"curation": "curate", "conclusions": "conclude", "profile_synthesis": "profile_synthesize", "review": "review"}
+                result["features"] = {key: bool(enabled and (key not in feature_tools or feature_tools[key] in self._tools))
+                                      for key, enabled in result.get("features", {}).items()}
+            elif operation == "update":
+                result = self.core.update(values["id"], values)
+            elif operation == "forget":
+                result = self.core.forget(values["id"])
+            else:
+                result = getattr(self.core, operation)(values)
+        except Exception:
+            raise MCPPublicError("backend_error") from None
+        return public_result(operation, result)
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        if self.runtime:
+            self.runtime.close(self.core.close)
         else:
-            raise KeyError(f"Unknown AgentRecall MCP operation: {operation}")
-        return _sanitize_public(result)
-
-    def close(self) -> None:
-        self.core.close()
+            self.core.close()
 
 
-def build_fastmcp(adapter: MCPAdapter):
-    """Build an MCP SDK server lazily so the core/Hermes path has no MCP dependency."""
+def build_fastmcp(adapter, *, workers=2, queue_capacity=2, operation_timeout=30.0, shutdown_timeout=1.0):
+    """Use explicit SDK handlers, not FastMCP's coercing/echoing function models."""
     try:
+        from mcp import types
         from mcp.server.fastmcp import FastMCP
-    except ImportError as exc:  # pragma: no cover - exercised by CLI smoke with optional dependency
+    except ImportError as exc:
         raise RuntimeError("The optional 'mcp' package is required to run the AgentRecall MCP server") from exc
+    if adapter.runtime is not None:
+        raise ValueError("An MCP adapter can have only one server")
+    adapter.runtime = BoundedRuntime(workers=workers, queue_capacity=queue_capacity,
+                                    operation_timeout=operation_timeout, shutdown_timeout=shutdown_timeout)
+    external = {"search", "prefetch_context", "profile", "remember", "update", "curate", "conclude", "profile_synthesize", "review"}
+    tracked = {"search", "prefetch_context", "profile"}
 
-    server = FastMCP("AgentRecall")
+    class PublicFastMCP(FastMCP):
+        async def run_stdio_async(self):
+            await run_stdio(self)
 
-    @server.tool(
-        name="remember", description="Store a durable memory under the server's fixed workspace/agent identity."
-    )
-    def remember(
-        content: str,
-        title: str = "",
-        summary: str = "",
-        visibility: str = "agent",
-        category: str = "general",
-        tags: list[str] | None = None,
-        importance: float = 0.5,
-        confidence: float = 0.8,
-        canonical_key: str = "",
-        expires_at: float = 0.0,
-        metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        return adapter.call(
-            "remember",
-            {
-                "content": content,
-                "title": title,
-                "summary": summary,
-                "visibility": visibility,
-                "category": category,
-                "tags": tags or [],
-                "importance": importance,
-                "confidence": confidence,
-                "canonical_key": canonical_key,
-                "expires_at": expires_at,
-                "metadata": metadata or {},
-            },
-        )
+        async def list_tools(self):
+            return [types.Tool(name=name, description=f"AgentRecall {name} under the server's fixed identity.",
+                inputSchema=INPUT_SCHEMAS[name], outputSchema=OUTPUT_SCHEMAS[name],
+                annotations=types.ToolAnnotations(
+                    readOnlyHint=name in adapter.READ_TOOLS and not (adapter.access == "read-write" and name in tracked),
+                    destructiveHint=name in {"remember", "update", "forget", "profile_synthesize", "review"},
+                    idempotentHint=name in {"get_memory", "health", "capabilities", "stats", "forget"} or (adapter.access == "read-only" and name in tracked),
+                    openWorldHint=name in external)) for name in adapter.tools]
 
-    @server.tool(
-        name="search",
-        description="Hybrid search over memories visible to the fixed server identity, with optional score explanations.",
-    )
-    def search(
-        query: str,
-        limit: int = 8,
-        include_shared: bool = True,
-        category: str = "",
-        tags: list[str] | None = None,
-        visibility: str = "",
-        source_agent_id: str = "",
-        min_importance: float | None = None,
-        updated_after: float | None = None,
-        explain: bool = False,
-    ) -> dict[str, Any]:
-        return adapter.call(
-            "search",
-            {
-                "query": query,
-                "limit": limit,
-                "include_shared": include_shared,
-                "category": category,
-                "tags": tags or [],
-                "visibility": visibility,
-                "source_agent_id": source_agent_id,
-                "min_importance": min_importance,
-                "updated_after": updated_after,
-                "explain": explain,
-            },
-        )
+        async def call_tool(self, name, arguments=None):
+            try:
+                values = adapter.prepare(name, arguments)
+                if name in {"health", "capabilities"}:
+                    result = adapter._execute(name, values)
+                else:
+                    result = await adapter.runtime.run(lambda: adapter._execute(name, values))
+                return types.CallToolResult(content=[types.TextContent(type="text", text=json.dumps(result))],
+                                            structuredContent=result, isError=False)
+            except MCPPublicError as exc:
+                error = {"success": False, "error": {"code": exc.code, "message": ERRORS[exc.code]}}
+            except Exception:
+                error = {"success": False, "error": {"code": "backend_error", "message": ERRORS["backend_error"]}}
+            return types.CallToolResult(content=[types.TextContent(type="text", text=json.dumps(error))],
+                                        structuredContent=error, isError=True)
 
-    @server.tool(
-        name="prefetch_context",
-        description="Return a bounded, ready-to-inject recall block and explain why memories ranked.",
-    )
-    def prefetch_context(
-        query: str,
-        limit: int = 6,
-        max_chars: int = 12_000,
-        explain: bool = True,
-        include_results: bool = False,
-    ) -> dict[str, Any]:
-        return adapter.call(
-            "prefetch_context",
-            {
-                "query": query,
-                "limit": limit,
-                "max_chars": max_chars,
-                "explain": explain,
-                "include_results": include_results,
-            },
-        )
+    server = PublicFastMCP("AgentRecall")
+    # Avoid SDK unknown-tool and output-validation exception echo paths too.
+    async def handle_call(request):
+        return types.ServerResult(await server.call_tool(request.params.name, request.params.arguments))
+    server._mcp_server.request_handlers[types.CallToolRequest] = handle_call
 
-    @server.tool(name="get_memory", description="Inspect one visible memory including provenance and ACL metadata.")
-    def get_memory(id: int, include_shared: bool = True) -> dict[str, Any]:
-        return adapter.call("get_memory", {"id": id, "include_shared": include_shared})
+    # The SDK's public dispatch table covers prompts/resources/completion too.
+    # HTTP status filtering cannot protect errors inside successful SSE streams.
+    # ErrorData is not a ServerResult variant: use McpError for RPC failures.
+    from mcp.shared.exceptions import McpError
 
-    @server.tool(name="update", description="Update, retag, promote/demote, or archive an owned visible memory.")
-    def update(
-        id: int,
-        content: str | None = None,
-        title: str | None = None,
-        summary: str | None = None,
-        visibility: str | None = None,
-        category: str | None = None,
-        tags: list[str] | None = None,
-        importance: float | None = None,
-        confidence: float | None = None,
-        archived: bool | None = None,
-        expires_at: float | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        values = {"id": id}
-        for key, value in {
-            "content": content,
-            "title": title,
-            "summary": summary,
-            "visibility": visibility,
-            "category": category,
-            "tags": tags,
-            "importance": importance,
-            "confidence": confidence,
-            "archived": archived,
-            "expires_at": expires_at,
-            "metadata": metadata,
-        }.items():
-            if value is not None:
-                values[key] = value
-        return adapter.call("update", values)
+    def public_handler(handler):
+        async def handle(request):
+            try:
+                result = await handler(request)
+                root = result.root if isinstance(result, types.ServerResult) else result
+                if isinstance(root, types.ErrorData):
+                    raise McpError(root)
+                if isinstance(root, types.CallToolResult) and root.isError:
+                    details = (root.structuredContent or {}).get("error", {})
+                    code = details.get("code") if isinstance(details, dict) else None
+                    if not isinstance(code, str) or code not in ERRORS:
+                        code = "backend_error"
+                    error = {"success": False, "error": {"code": code, "message": ERRORS[code]}}
+                    safe = types.CallToolResult(isError=True, structuredContent=error,
+                        content=[types.TextContent(type="text", text=json.dumps(error))])
+                    return types.ServerResult(safe) if isinstance(result, types.ServerResult) else safe
+                return result
+            except McpError as exc:
+                raise McpError(types.ErrorData(code=exc.error.code, message="Operation failed.")) from None
+            except Exception:
+                raise McpError(types.ErrorData(code=types.INTERNAL_ERROR, message="Operation failed.")) from None
+        return handle
 
-    @server.tool(name="forget", description="Delete an owned visible memory while enforcing AgentRecall ACLs.")
-    def forget(id: int) -> dict[str, Any]:
-        return adapter.call("forget", {"id": id})
-
-    @server.tool(
-        name="curate",
-        description="Extract durable memory candidates with the configured curator; supports dry-run review.",
-    )
-    def curate(text: str, default_visibility: str = "agent", dry_run: bool = True) -> dict[str, Any]:
-        return adapter.call(
-            "curate",
-            {"text": text, "default_visibility": default_visibility, "dry_run": dry_run},
-        )
-
-    @server.tool(
-        name="conclude", description="Store an inspectable, source-linked conclusion when conclusions are enabled."
-    )
-    def conclude(
-        content: str,
-        scope: str = "general",
-        subject: str = "",
-        source_ids: list[int] | None = None,
-        visibility: str = "agent",
-        confidence: float = 0.8,
-        supersedes: list[int] | None = None,
-    ) -> dict[str, Any]:
-        return adapter.call(
-            "conclude",
-            {
-                "content": content,
-                "scope": scope,
-                "subject": subject,
-                "source_ids": source_ids or [],
-                "visibility": visibility,
-                "confidence": confidence,
-                "supersedes": supersedes or [],
-            },
-        )
-
-    @server.tool(name="profile", description="Return identity, isolation settings, and focused visible memories.")
-    def profile(focus: str = "", limit: int = 10) -> dict[str, Any]:
-        return adapter.call("profile", {"focus": focus, "limit": limit})
-
-    @server.tool(
-        name="profile_synthesize", description="Synthesize a peer/workspace/agent profile, dry-run by default."
-    )
-    def profile_synthesize(
-        scope: str = "peer",
-        subject: str = "",
-        focus: str = "",
-        dry_run: bool = True,
-        visibility: str = "agent",
-    ) -> dict[str, Any]:
-        return adapter.call(
-            "profile_synthesize",
-            {
-                "scope": scope,
-                "subject": subject,
-                "focus": focus,
-                "dry_run": dry_run,
-                "visibility": visibility,
-            },
-        )
-
-    @server.tool(name="review", description="Run bounded conflict/staleness/promotion review, dry-run by default.")
-    def review(focus: str = "", dry_run: bool = True, limit: int = 20) -> dict[str, Any]:
-        return adapter.call("review", {"focus": focus, "dry_run": dry_run, "limit": limit})
-
-    @server.tool(name="stats", description="Show ACL-filtered memory counts for the server identity.")
-    def stats() -> dict[str, Any]:
-        return adapter.call("stats", {})
-
-    @server.tool(
-        name="health", description="Inspect SQLite integrity/concurrency settings and embedding configuration."
-    )
-    def health() -> dict[str, Any]:
-        return adapter.call("health", {})
-
-    @server.tool(
-        name="capabilities",
-        description="Describe enabled AgentRecall features, fixed identity, access mode, and tools.",
-    )
-    def capabilities() -> dict[str, Any]:
-        return adapter.call("capabilities", {})
-
+    for request_type, handler in tuple(server._mcp_server.request_handlers.items()):
+        server._mcp_server.request_handlers[request_type] = public_handler(handler)
     return server
 
 
@@ -352,6 +211,7 @@ def create_adapter_from_config(
     agent_id: str = "",
     session_id: str = "",
     access: str = "",
+    tools: list[str] | None = None,
 ) -> MCPAdapter:
     path = Path(config_path).expanduser().resolve()
     config = load_config(path.parent, path)
@@ -363,34 +223,21 @@ def create_adapter_from_config(
         AgentIdentity(workspace, agent, session),
         curator_factory=lambda: build_curator(config),
     )
-    return MCPAdapter(core, access=access or str(config.get("mcp_access") or "read-write"))
+    return MCPAdapter(core, access=access or str(config.get("mcp_access") or "read-only"),
+                      tools=tools if tools is not None else config.get("mcp_tools"))
 
 
 def run_http_server(server, *, transport: str, host: str, port: int, bearer_token: str = "") -> None:
     """Run HTTP MCP with fail-closed static bearer authentication by default."""
     try:
         import uvicorn
-        from starlette.middleware.base import BaseHTTPMiddleware
-        from starlette.responses import JSONResponse
+
     except ImportError as exc:  # pragma: no cover - provided by the MCP HTTP extra
         raise RuntimeError("MCP HTTP transport requires uvicorn and starlette") from exc
 
     app = server.streamable_http_app() if transport == "streamable-http" else server.sse_app()
-    if bearer_token:
-
-        class BearerAuthMiddleware(BaseHTTPMiddleware):
-            async def dispatch(self, request, call_next):
-                supplied = request.headers.get("authorization", "")
-                expected = f"Bearer {bearer_token}"
-                if not hmac.compare_digest(supplied, expected):
-                    return JSONResponse(
-                        {"error": "unauthorized"},
-                        status_code=401,
-                        headers={"WWW-Authenticate": "Bearer"},
-                    )
-                return await call_next(request)
-
-        app.add_middleware(BearerAuthMiddleware)
+    app = HTTPBoundary(app, bearer_token=bearer_token,
+                       security_settings=server.settings.transport_security)
 
     uvicorn.run(app, host=host, port=port, log_level="info")
 

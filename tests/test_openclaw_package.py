@@ -24,6 +24,8 @@ def test_openclaw_manifest_and_package_declare_native_memory_contract():
     assert package["openclaw"]["extensions"] == ["./openclaw_plugin/index.js"]
     assert package["openclaw"]["compat"]["pluginApi"] == ">=2026.5.22"
     assert "agent_recall_bridge.py" in package["files"]
+    assert "agent_recall_session_archive.py" in package["files"]
+    assert "agent_recall_session_learning.py" not in package["files"]
     assert "CHANGELOG.md" in package["files"]
     assert "scripts/install_openclaw_plugin.py" in package["files"]
     assert "docs/OPENCLAW.md" in package["files"]

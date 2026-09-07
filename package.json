@@ -13,6 +13,7 @@
     "agent_recall_bridge.py",
     "agent_recall_core.py",
     "agent_recall_curator.py",
+    "agent_recall_session_archive.py",
     "agent_recall_store.py",
     "scripts/install_openclaw_plugin.py",
     "docs/OPENCLAW.md",

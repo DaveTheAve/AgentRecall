@@ -20,6 +20,14 @@ AgentRecall has three optional network-facing paths:
 
 The curation backend, model, base URL, command, API-key env var, and timeout are configurable. MCP bearer tokens also belong in environment variables, never config files. Do not put API keys in this repository or in committed config examples.
 
+## SessionArchive boundary
+
+The optional Hermes SessionArchive companion delegates only to the current profile's host-owned search API. It accepts no caller-supplied database path or profile, rejects unverifiable host wrappers, does not fall back to a bare cross-profile session ID, and must fail closed when the host cannot prove profile isolation. Successful host payloads remain compatible; exceptions and unsuccessful payloads are replaced with generic errors so queries, filesystem paths, and host exception details are not reflected.
+
+SessionArchive output is untrusted historical data, not instructions. A Hermes profile may contain several sessions or gateway conversations, so operators should use separate profiles for mutually untrusted users. The adapter is read-only and does not build, repair, migrate, or mutate Hermes' FTS index.
+
+Manual curation uses the configured curation backend; review backend retention policies. For `codex-cli`, prompts pass over standard input rather than command-line arguments. Transport output and JSON parsing are bounded; errors do not echo backend/source details.
+
 ## OpenClaw local bridge
 
 The native OpenClaw plugin starts one local Python child process using `node:child_process` with an argument vector and `shell: false`. It communicates over inherited stdio only and opens no listening socket. OpenClaw's installer flags all external child-process use and blocks installation by default; `scripts/install_openclaw_plugin.py` supplies the explicit `--dangerously-force-unsafe-install` acknowledgement. Review the checkout before using that option.
@@ -37,7 +45,7 @@ The SQLite database can contain sensitive user preferences, operational details,
 
 ## Reporting issues
 
-Please report security issues privately to the maintainer instead of opening a public issue with exploit details.
+Please report security issues through [GitHub's private security-advisory form](https://github.com/DaveTheAve/AgentRecall/security/advisories/new) instead of opening a public issue with exploit details.
 
 Include:
 

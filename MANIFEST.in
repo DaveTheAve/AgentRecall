@@ -15,10 +15,11 @@ include agent_recall_bridge.py
 include agent_recall_core.py
 include agent_recall_curator.py
 include agent_recall_mcp.py
+include agent_recall_mcp_contracts.py
+include agent_recall_mcp_runtime.py
+include agent_recall_session_archive.py
 include agent_recall_schemas.py
 include agent_recall_store.py
-include benchmarks/GITHUB_0.2.0_COMPATIBILITY.md
-include benchmarks/WEIGHT_TUNING.md
 include cli.py
 include docs/ARCHITECTURE.md
 include docs/MCP.md
@@ -46,6 +47,7 @@ include tests/test_core_service.py
 include tests/test_correctness_blockers.py
 include tests/test_curator.py
 include tests/test_embedding_client.py
+include tests/test_explicit_memory.py
 include tests/test_intelligence_modules.py
 include tests/test_lean_memory_lifecycle.py
 include tests/test_mcp_adapter.py
@@ -55,7 +57,13 @@ include tests/test_provider_tools.py
 include tests/test_public_wording.py
 include tests/test_release_artifacts.py
 include tests/test_review_findings.py
+include tests/test_session_archive.py
 include tests/test_shared_mutation_policy.py
 include tests/test_store_acl.py
 include tests/test_store_concurrency.py
 include uv.lock
+include benchmarks/version_comparison/README.md
+include scripts/benchmark_version_comparison.py
+include tests/test_version_comparison.py
+include tests/test_mcp_release.py
+include tests/test_mcp_security.py

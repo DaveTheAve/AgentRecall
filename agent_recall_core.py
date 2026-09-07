@@ -12,10 +12,20 @@ from typing import Any
 
 try:
     from .agent_recall_curator import ChatCompletionsCurator, CodexCliCurator
-    from .agent_recall_store import AgentRecallStore, EmbeddingClient, _json_dumps, normalize_text
+    from .agent_recall_store import (
+        AgentRecallStore,
+        EmbeddingClient,
+        _json_dumps,
+        normalize_text,
+    )
 except ImportError:
     from agent_recall_curator import ChatCompletionsCurator, CodexCliCurator
-    from agent_recall_store import AgentRecallStore, EmbeddingClient, _json_dumps, normalize_text
+    from agent_recall_store import (
+        AgentRecallStore,
+        EmbeddingClient,
+        _json_dumps,
+        normalize_text,
+    )
 
 
 class AgentRecallError(RuntimeError):
@@ -71,6 +81,7 @@ def default_config(base_dir: str | Path) -> dict[str, Any]:
         "demotion_rules_enabled": False,
         "auto_capture_turns": False,
         "auto_capture_compression_checkpoints": False,
+        "session_archive_enabled": False,
         "auto_capture_visibility": "session",
         "prefetch_limit": 6,
         "max_memory_chars": 12_000,
@@ -192,6 +203,7 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
         "demotion_rules_enabled": False,
         "auto_capture_turns": False,
         "auto_capture_compression_checkpoints": False,
+        "session_archive_enabled": False,
         "allow_any_agent_to_mutate_shared": False,
         "llm_curator_enabled": True,
     }
@@ -322,7 +334,12 @@ class AgentRecallCore:
             self.identity.user_id,
         )
 
-    def remember(self, args: dict[str, Any], *, identity: AgentIdentity | None = None) -> dict[str, Any]:
+    def remember(
+        self,
+        args: dict[str, Any],
+        *,
+        identity: AgentIdentity | None = None,
+    ) -> dict[str, Any]:
         if not self.config.get("raw_memories_enabled", True):
             raise AgentRecallError("Raw memory storage is disabled by raw_memories_enabled=false")
         scope = identity or self.identity
@@ -647,8 +664,14 @@ class AgentRecallCore:
             return {"success": True, "stored": 0, "candidates": candidates}
         stored = []
         for item in candidates:
-            item.setdefault("visibility", args.get("default_visibility") or "agent")
-            stored.append(self.remember(item))
+            memory_item = dict(item)
+            # Curators may suggest topics, but only an explicit remember call may
+            # choose an authoritative canonical key. This prevents any model
+            # backend from colliding with and updating an existing memory.
+            memory_item.pop("canonical_key", None)
+            memory_item.pop("canonical_key_hint", None)
+            memory_item.setdefault("visibility", args.get("default_visibility") or "agent")
+            stored.append(self.remember(memory_item))
         return {"success": True, "stored": len(stored), "results": stored}
 
     def conclude(self, args: dict[str, Any]) -> dict[str, Any]:

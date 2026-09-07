@@ -42,6 +42,8 @@ def test_copy_install_excludes_local_artifacts(tmp_path, payload):
     assert (dest / "__init__.py").is_file()
     assert (dest / "hermes_plugin/__init__.py").is_file()
     assert (dest / "agent_recall_store.py").is_file()
+    assert (dest / "agent_recall_session_archive.py").is_file()
+
     marker = dest / "keep.txt"
     marker.write_text("existing installation")
     result = subprocess.run([sys.executable, str(source / "scripts/install_user_plugin.py"),
@@ -78,13 +80,59 @@ def test_sdist_contains_testable_release_surface_only(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     with tarfile.open(next((source / "dist").glob("*.tar.gz"))) as archive:
         names = {name.split("/", 1)[1] for name in archive.getnames() if "/" in name}
-    required = {"tests/conftest.py", "__init__.py", "plugin.yaml", "package.json",
+    required = {"tests/conftest.py", "tests/test_session_archive.py", "__init__.py",
+                "agent_recall_session_archive.py", "plugin.yaml", "package.json",
                 "openclaw.plugin.json", "openclaw_plugin/test/plugin.test.mjs",
                 "scripts/install_user_plugin.py", "scripts/benchmark_retrieval.py",
                 "scripts/smoke_packed_openclaw.mjs", "docs/OPENCLAW.md", "CHANGELOG.md",
-                "MANIFEST.in", ".gitignore", ".npmignore"}
+                "scripts/benchmark_version_comparison.py", "benchmarks/version_comparison/README.md",
+                "tests/test_version_comparison.py", "tests/test_mcp_release.py",
+                "tests/test_explicit_memory.py", "MANIFEST.in", ".gitignore", ".npmignore"}
     assert required <= names, sorted(required - names)
+    retired = {
+        "scripts/benchmark_learning_quality.py",
+        "tests/test_learning_benchmark.py",
+        "tests/test_session_learning.py",
+        "tests/test_session_end_learning.py",
+        "tests/test_learning_core_extraction.py",
+    }
+    assert not retired & names, sorted(retired & names)
+    assert not any(name.startswith("benchmarks/learning_quality") for name in names)
     assert not {".env", "Archive.tar.gz", "hermes_plugin/private.db", "docs/private.tar.gz"} & names
+
+
+@pytest.mark.skipif(not shutil.which("npm") or not shutil.which("node"), reason="npm and node are required")
+def test_npm_pack_contains_session_modules_and_bridge_starts(tmp_path):
+    source = _source_copy(tmp_path)
+    pack_dir = tmp_path / "npm-pack"
+    pack_dir.mkdir()
+    result = subprocess.run(
+        ["npm", "pack", "--pack-destination", str(pack_dir)],
+        cwd=source,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    archive_path = next(pack_dir.glob("*.tgz"))
+    extracted = tmp_path / "extracted"
+    with tarfile.open(archive_path) as archive:
+        names = set(archive.getnames())
+        archive.extractall(extracted, filter="data")
+    required = {
+        "package/agent_recall_session_archive.py",
+    }
+    assert required <= names, sorted(required - names)
+
+    smoke = subprocess.run(
+        ["node", str(source / "scripts/smoke_packed_openclaw.mjs"), str(extracted / "package")],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert smoke.returncode == 0, smoke.stdout + smoke.stderr
+    assert "packed-openclaw-bridge-smoke-ok" in smoke.stdout
 
 
 @pytest.mark.skipif(not os.environ.get("AGENT_RECALL_HERMES_PYTHON"), reason="opt-in real Hermes runtime")

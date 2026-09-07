@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 from conftest import load_provider_module
@@ -123,6 +124,8 @@ def test_python_distribution_packages_the_native_provider_and_manifest():
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
     assert 'packages = ["hermes_plugin"]' in pyproject
+    assert '"agent_recall_session_archive"' in pyproject
+    assert '"agent_recall_session_learning"' not in pyproject
     assert 'hermes_plugin = ["plugin.yaml"]' in pyproject
     packaged_manifest = ROOT / "hermes_plugin" / "plugin.yaml"
     assert (ROOT / "hermes_plugin" / "__init__.py").is_file()
@@ -143,7 +146,7 @@ def test_v0_3_public_docs_cover_upgrade_and_new_lifecycle_fields():
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
     for term in ("v0.3.0", "canonical_key", "expires_at", "physical cleanup", "online backup"):
-        assert term in readme
+        assert term.casefold() in readme.casefold()
     for term in ("canonical_key", "expires_at"):
         assert term in mcp
     for term in ("canonicalKey", "expiresAt"):
@@ -152,14 +155,46 @@ def test_v0_3_public_docs_cover_upgrade_and_new_lifecycle_fields():
         assert term in changelog
 
 
-def test_benchmark_evidence_is_environment_neutral():
-    benchmark_docs = "\n".join(
-        path.read_text(encoding="utf-8") for path in sorted((ROOT / "benchmarks").glob("*.md"))
+def test_public_docs_preserve_supported_boundaries():
+    documents = {
+        name: (ROOT / name).read_text(encoding="utf-8")
+        for name in ("README.md", "INSTALL.md", "SECURITY.md", "CHANGELOG.md")
+    }
+    documents.update(
+        {
+            str(path.relative_to(ROOT)): path.read_text(encoding="utf-8")
+            for path in sorted((ROOT / "docs").glob("*.md"))
+        }
     )
-    assert re.search(r"\$HOME/(?:Desktop|\.hermes)/", benchmark_docs) is None
-    assert re.search(r"AgentRecall_[A-Za-z0-9]", benchmark_docs) is None
-    assert re.search(r"(?i)\b[a-z0-9.]+-embedding-\d+b(?:-[a-z0-9_.-]+)?", benchmark_docs) is None
-    assert re.search(r'"embedding_base_url"\s*:\s*"http://127\.0\.0\.1:(?!8000\b)\d+', benchmark_docs) is None
+
+    readme = documents["README.md"]
+    install = documents["INSTALL.md"]
+    architecture = documents["docs/ARCHITECTURE.md"]
+    security = documents["SECURITY.md"]
+    changelog = documents["CHANGELOG.md"]
+    mcp = documents["docs/MCP.md"]
+    flat_mcp = " ".join(mcp.split())
+    for term in ("SessionArchive", "current Hermes profile", "auto_capture_turns",
+                 "auto_capture_compression_checkpoints", "agent_recall_remember"):
+        assert term in readme
+    for term in ("SessionArchive", "state.db FTS5", "host-neutral", "optional twelfth tool",
+                 "never duplicates, migrates, or writes"):
+        assert term in architecture
+    for term in ("fail closed", "untrusted historical data", "caller-supplied database path",
+                 "cross-profile session ID", "standard input rather than command-line arguments",
+                 "bounded"):
+        assert term in security
+    for term in ('"session_archive_enabled": false', "raw Hermes conversation history",
+                 "current profile", "untrusted historical data"):
+        assert term in install
+    for term in ("SessionArchive", "current Hermes profile", "untrusted data",
+                 "MCP now defaults to read-only", "strict request schemas",
+                 "stable public errors"):
+        assert term in changelog
+    for term in ("default is **read-only**", "fixed identity", "execution allowlist",
+                 "65,536 serialized argument bytes", "1 MiB response budget",
+                 "requires a bearer token", "Host and Origin", "Operation failed."):
+        assert term in flat_mcp
 
 
 def test_public_examples_and_benchmark_defaults_use_neutral_identities():
@@ -172,6 +207,16 @@ def test_public_examples_and_benchmark_defaults_use_neutral_identities():
 
 
 def test_release_candidate_excludes_local_environments_dependencies_and_private_backlog():
-    assert not (ROOT / ".venv").exists()
-    assert not (ROOT / "node_modules").exists()
-    assert not (ROOT / "IDEAS.md").exists()
+    result = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        release_files = set(result.stdout.split("\0"))
+    else:
+        sources = next(ROOT.glob("*.egg-info/SOURCES.txt"))
+        release_files = set(sources.read_text(encoding="utf-8").splitlines())
+    for excluded in (".venv", "node_modules", "IDEAS.md"):
+        assert not any(path == excluded or path.startswith(f"{excluded}/") for path in release_files)

@@ -188,8 +188,8 @@ class AgentRecallStore:
         with self._lock:
             self.conn.close()
 
-    def _ensure_column_locked(self, column: str, ddl: str) -> None:
-        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(memories)").fetchall()}
+    def _ensure_column_locked(self, table: str, column: str, ddl: str) -> None:
+        columns = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if column in columns:
             return
         try:
@@ -198,16 +198,18 @@ class AgentRecallStore:
             # Multiple host processes can open the same old shared DB at once.
             # If another process won the ALTER race, accept the now-present
             # column; propagate every other migration failure.
-            columns = {row[1] for row in self.conn.execute("PRAGMA table_info(memories)").fetchall()}
+            columns = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
             if column not in columns:
                 raise
 
     def _migrate_schema_locked(self) -> None:
         self._ensure_column_locked(
+            "memories",
             "canonical_key",
             "ALTER TABLE memories ADD COLUMN canonical_key TEXT NOT NULL DEFAULT ''",
         )
         self._ensure_column_locked(
+            "memories",
             "expires_at",
             "ALTER TABLE memories ADD COLUMN expires_at REAL NOT NULL DEFAULT 0",
         )
@@ -303,7 +305,7 @@ class AgentRecallStore:
             ts,
             ts,
         )
-        with self._lock:
+        with self._lock, self.conn:
             cur = self.conn.execute(
                 """
                 INSERT INTO memories (
@@ -324,10 +326,21 @@ class AgentRecallStore:
                     """
                     SELECT id FROM memories
                     WHERE workspace_id = ? AND agent_id = ? AND visibility = ?
-                      AND (? <> 'session' OR session_id = ?) AND canonical_key = ?
+                      AND session_id = ? AND canonical_key = ?
                     """,
-                    [workspace_id, agent_id, visibility, visibility, session_id or "", canonical_key],
+                    [workspace_id, agent_id, visibility, session_id or "", canonical_key],
                 ).fetchone()
+                if row is None and visibility != "session":
+                    # Durable canonical uniqueness is cross-session, so every
+                    # conflict mode must resolve the durable winner globally.
+                    row = self.conn.execute(
+                        """
+                        SELECT id FROM memories
+                        WHERE workspace_id = ? AND agent_id = ? AND visibility = ?
+                          AND canonical_key = ?
+                        """,
+                        [workspace_id, agent_id, visibility, canonical_key],
+                    ).fetchone()
                 if row is None:
                     raise sqlite3.IntegrityError("canonical conflict row disappeared during upsert")
                 memory_id = int(row["id"])
@@ -415,6 +428,40 @@ class AgentRecallStore:
                 [workspace_id, agent_id, visibility, visibility, session_id or "", key],
             ).fetchone()
         return int(row["id"]) if row else None
+
+    def exact_visible_durable_memory_id(
+        self,
+        *,
+        workspace_id: str,
+        agent_id: str,
+        content: str,
+        include_shared: bool = True,
+    ) -> int | None:
+        """Find equal active durable content without mutating access counters."""
+        normalized = " ".join((content or "").casefold().split())
+        if not normalized:
+            return None
+        visible = "(visibility = 'agent' AND agent_id = ?)"
+        args: list[Any] = [workspace_id, _now(), agent_id]
+        if include_shared:
+            visible += " OR visibility = 'shared'"
+        with self._lock:
+            rows = self.conn.execute(
+                f"""
+                SELECT id, content FROM memories
+                WHERE workspace_id = ? AND archived = 0
+                  AND (expires_at <= 0 OR expires_at > ?)
+                  AND visibility IN ('agent', 'shared')
+                  AND ({visible})
+                ORDER BY id
+                """,
+                args,
+            ).fetchall()
+        for row in rows:
+            if " ".join(str(row["content"] or "").casefold().split()) == normalized:
+                return int(row["id"])
+        return None
+
 
     def _fts_query(self, query: str, *, prefix: bool = False) -> str:
         terms = [t.lower() for t in re.findall(r"[\w]+", query or "") if len(t) > 1]

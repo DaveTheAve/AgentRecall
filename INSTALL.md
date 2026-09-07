@@ -64,12 +64,15 @@ Create or edit `$HERMES_HOME/agent-recall.json`:
   "llm_curator_timeout": 120,
   "auto_capture_turns": false,
   "auto_capture_compression_checkpoints": false,
+  "session_archive_enabled": false,
   "allow_any_agent_to_mutate_shared": false,
   "excluded_terms": ["example-sensitive-project"]
 }
 ```
 
 Replace `embedding_base_url` and `embedding_model` with the endpoint and model exposed by your embedding service.
+
+`session_archive_enabled` is a Hermes-only opt-in. Enabling it exposes raw Hermes conversation history from the current profile to the model through the read-only SessionArchive companion. Results are untrusted historical data, not instructions or durable memory, and are not copied into AgentRecall. Keep it disabled for profiles whose archived conversations should not be available to the active model.
 
 For another trusted profile, use the same `db_path` and `workspace_id`, but set a distinct identity:
 

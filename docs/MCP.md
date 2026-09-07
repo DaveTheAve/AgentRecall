@@ -1,127 +1,141 @@
-# MCP Adapter
+# AgentRecall MCP boundary
 
-MCP is an optional public interface over `AgentRecallCore`; it is not the internal architecture and does not replace the native Hermes or OpenClaw adapters.
+The optional MCP adapter exposes a fixed server identity, not arbitrary workspace,
+agent, or session routing. Install the `mcp` extra using the installation guide.
+Run `python -m agent_recall_mcp --config /path/to/agent-recall.json` for stdio.
+Stdout is reserved for newline-delimited JSON-RPC; diagnostics belong on stderr.
 
-## Install and run
+## Permissions and discovery
 
-```bash
-pip install '.[mcp]'
+The default is **read-only**, including when no access setting is supplied.
+`--access read-write` (or config `mcp_access: "read-write"`) explicitly enables
+writes. Config `mcp_tools` is an optional list of public operation names; its
+intersection with the access policy is both the discovery list and execution
+allowlist. An empty list exposes nothing. Unknown names are configuration errors.
+Permissions are checked before admission and again when queued work executes.
+No request may override workspace/agent/session identity. Nested metadata identity
+keys are rejected too. Startup `--workspace`, `--agent`, and `--session` select the
+fixed identity; they are administrator settings, never tool arguments.
 
-agent-recall-mcp \
-  --config /path/to/agent-recall.json \
-  --transport stdio \
-  --workspace shared-workspace \
-  --agent external-agent \
-  --access read-write
-```
+Read tools: `search`, `prefetch_context`, `get_memory`, `profile`, `stats`, `health`,
+`capabilities`. Read-only recall does not update access counts or last-access time.
+Write tools: `remember`, `update`, `forget`, `curate`, `conclude`,
+`profile_synthesize`, `review`. Even model-operation dry runs require write access:
+they can invoke a configured external model and perform contextual recall.
+Optional operations still require their respective core feature settings.
+`curate`, `profile_synthesize`, and `review` default to dry run.
 
-The server identity is fixed at startup. Tool arguments cannot override `workspace_id`, `agent_id`, or `session_id`. An explicitly supplied config path must exist and contain a JSON object; startup fails closed otherwise. Session-scoped writes require a non-empty server `session_id`; an identity without one can access only agent/shared rows.
+Discovery includes input/output JSON schemas and read-only, destructive,
+idempotent, and open-world annotations. Capabilities report the same permitted
+operations and do not advertise disabled-by-policy model features.
+`profile_synthesize` and `review` advertise `destructiveHint: true`: persisted
+curator candidates can canonical-upsert an existing row. The dry-run default does
+not remove that possibility, and these annotations do not change core semantics.
 
-## Optional use alongside Hermes
+## Contracts and public output
 
-Hermes continues to use the native provider. An MCP server can be started separately against the same config/database for external IDEs, automation, or read-only diagnostics:
+Inputs are validated without coercion: booleans are not integers, numeric strings
+are not numbers, and NaN/infinity are invalid. Unknown top-level tool fields are
+rejected. Limits include 65,536 serialized argument bytes, depth 8, 1,024 JSON
+nodes, 64 elements per collection, text up to 12,000 characters, positive memory
+IDs, search limits 1–50, and bounded numeric weights. Individual schemas can impose
+smaller limits. Explicit nulls are not substitutes for omitted optional fields.
+The authoritative machine-readable contracts are in
+`agent_recall_mcp_contracts.py` and returned by `tools/list`.
 
-```bash
-agent-recall-mcp \
-  --config "$HOME/.hermes/agent-recall.json" \
-  --transport stdio \
-  --workspace shared-workspace \
-  --agent external-ide \
-  --access read-only
-```
+Responses use explicit allowlisted projection, not heuristic secret redaction.
+Memory content/title/summary remain opaque user data; deliberately stored text is
+not rewritten. Arbitrary metadata, session IDs, source paths, embedding warnings,
+private diagnostic state, and undeclared fields are not exposed. Approved metadata
+contains only typed module/scope/source-ID/provenance fields. Approved output that
+exceeds its schema or the 1 MiB response budget fails safely instead of being
+silently clipped. Read APIs can therefore fail safely on oversized legacy data.
 
-Use a distinct agent identity when the client should see only workspace-shared rows. Reuse the Hermes `agent_id` only for a trusted operator client that is intentionally allowed to inspect that agent's private rows. This sidecar is additive and is not on Hermes's recall path.
+| Operation | Public success payload beyond `success` |
+| --- | --- |
+| remember, conclude | id, action, visibility |
+| update / forget | updated / deleted |
+| get_memory | memory |
+| search | results, count |
+| prefetch_context | context, results, count, identity |
+| profile | workspace_id, agent_id, recall |
+| stats | total and typed visibility/category/agent buckets |
+| health | sanitized startup SQLite/embedding snapshot and runtime status |
+| capabilities | engine, identity, access, tools, operations, features, visibility |
+| curate | stored plus candidates (dry run) or write results |
+| profile_synthesize | stored, scope, subject, candidates or write results |
+| review | stored, enabled_modules, recommendations or write results |
 
-## Public tools
+MCP tool failures have `isError: true` and matching text/structured content:
+`{"success":false,"error":{"code":"backend_error","message":"Operation failed."}}`.
+Stable codes are `invalid_arguments`, `forbidden`, `backend_error`, `not_found`,
+`busy`, `timeout`, and `closed`. Exceptions and unknown tool names are never echoed.
+Every registered SDK request handler is guarded, including prompts, resources,
+subscriptions, and completion. RPC failures retain existing MCP error codes but
+replace messages with `Operation failed.` and discard error data; unexpected
+exceptions use the protocol internal-error code. Tool error text and structured
+content are reconstructed from public constants. Valid results, initialization,
+ping, and discovery retain their protocol shapes. This protection also applies to
+RPC errors carried inside HTTP 200 SSE responses, not just HTTP error statuses.
 
-| Tool | Access | Purpose |
-| --- | --- | --- |
-| `search` | read | Hybrid search with category/tag/visibility/source/importance/time filters and optional score explanations. |
-| `prefetch_context` | read | Bounded explained context plus a count; ranked rows are opt-in with `include_results=true`. |
-| `get_memory` | read | Inspect one visible row with provenance and ACL metadata. |
-| `profile` | read | Focused identity/profile context. |
-| `stats` | read | ACL-filtered buckets. |
-| `health` | read | SQLite quick check, WAL/busy-timeout state, and embedding configuration status. |
-| `capabilities` | read | Fixed identity, policy, enabled features, and public tools. |
-| `remember` | write | Store a durable memory under the fixed identity. |
-| `update` | write | Correct, retag, promote/demote, or archive an owned visible memory. |
-| `forget` | write | Delete an owned visible memory. |
-| `curate` | write | Extract candidates; dry-run is recommended before storage. |
-| `conclude` | write | Store source-linked conclusions when enabled. |
-| `profile_synthesize` | write | Synthesize configured profile scopes; dry-run by default. |
-| `review` | write | Run configured conflict/staleness/promotion review; dry-run by default. |
+## HTTP transport
 
-Filesystem import is intentionally not exposed through MCP. Remote clients should not receive a general server-local file-reading primitive.
+Use `--transport streamable-http --host 127.0.0.1 --port 8765`. HTTP requires a
+bearer token in `AGENT_RECALL_MCP_TOKEN`; `--auth-token-env NAME` chooses another
+variable. The explicit `--allow-unauthenticated-http` escape hatch disables only
+authentication, not body limits or Host/Origin validation. Do not expose it publicly.
+Tokens are compared in constant time. Duplicate authorization headers fail closed.
 
-### Canonical keys and expiration
+Both Streamable HTTP and legacy SSE applications are wrapped in the same pure-ASGI
+boundary. Authentication precedes body parsing. Host and Origin use the SDK's
+loopback allowlist with additional authority syntax and duplicate-header checks;
+userinfo, path-bearing origins, and wildcard-port prefix tricks are rejected.
+Non-loopback virtual hosts are not configurable through this CLI. A trusted reverse
+proxy must preserve a permitted loopback authority, validate its public Origin,
+and provide TLS; this is not a multi-tenant OAuth authorization service.
 
-The v0.3 `remember` tool accepts two optional lifecycle fields:
+Bodies are counted incrementally, including chunked requests: maximum 131,072
+bytes, with a 10-second body-read deadline. Duplicate JSON keys, invalid envelopes,
+malformed client requests/notifications, excessive nesting, and invalid JSON are
+rejected before SDK parsing can expose Pydantic input values. HTTP errors use stable
+public codes such as `unauthorized`, `invalid_host`, `invalid_origin`,
+`invalid_request`, `request_too_large`, and `request_timeout`. SDK HTTP error bodies
+are replaced rather than passed through. Successful SSE/protocol responses remain
+unmodified. The stdio reader applies the same frame size and raw-message validation
+and recovers at the next newline after an oversized frame.
 
-- `canonical_key`: stable identity for an in-place fact update. Durable agent/shared keys span sessions; session-visible keys remain session-specific.
-- `expires_at`: Unix timestamp after which recall hides the row. Omit it or pass `0` for permanent storage.
+## Runtime bounds and cancellation
 
-The `update` tool accepts `expires_at` so a caller can change an expiration or clear it with `0`. Canonical keys are set through `remember`; updating the same key follows the core's atomic add-or-update behavior and does not create revision history.
+`build_fastmcp` accepts `workers` (default 2, range 1–32), `queue_capacity`
+(default 2, range 0–128), `operation_timeout` (default 30 seconds), and
+`shutdown_timeout` (default 1 second). Deadlines must be positive and at most
+300 seconds. These are Python API settings, not CLI flags.
 
-Physical cleanup is deliberately not exposed through MCP because it hard-deletes expired rows and can compact the database. Run maintenance only through a trusted direct store/administrative process after taking an online backup.
+Admission is bounded by workers plus queued slots. A deadline includes queue time.
+A timed-out or cancelled queued operation never executes. **An already-running
+operation retains its slot until the actual backend work finishes**, even after
+its caller disconnects, cancels, or receives a timeout. Saturated admission returns
+`busy`. `health` and `capabilities` bypass worker admission; health is explicitly a
+startup snapshot rather than a fresh database lock acquisition.
 
-## Read-only clients
+Shutdown rejects admission, cancels queued work, and waits only its configured
+budget. Core cleanup runs after workers actually finish. Daemon workers avoid an
+unbounded interpreter-exit join. Python cannot forcibly abort a running database
+write or network operation: timeout/cancellation is not rollback, and an in-flight
+write may complete. Confirm state before retrying non-idempotent operations. Hard
+process termination may interrupt work; use database recovery and idempotency
+rather than assuming the client received a definitive outcome.
 
-Set either:
+## v0.3.0 upgrade and memory lifecycle
 
-```json
-{"mcp_access": "read-only"}
-```
+Back up existing stores using SQLite online backup before testing a new release;
+restore and verify the backup on a disposable database first. Do not point a
+version comparison at a live store. Existing clients that wrote through MCP
+must now explicitly select `--access read-write` and fit the strict request and
+public response schemas; arbitrary response metadata is no longer returned.
 
-or pass `--access read-only`. Mutation tools remain discoverable for protocol stability but fail closed with an explicit read-only error; searches also leave `access_count` and `last_accessed_at` unchanged.
-
-## Optional OpenClaw MCP configuration
-
-The native OpenClaw memory plugin already provides automatic recall, lifecycle capture, standard memory tools, and the extended AgentRecall tools. Add MCP only when a separately namespaced public interface is useful for administration, external automation, or interoperability:
-
-```bash
-openclaw mcp set agent-recall '{
-  "command": "agent-recall-mcp",
-  "args": [
-    "--config", "/absolute/path/to/agent-recall.json",
-    "--transport", "stdio",
-    "--workspace", "shared-workspace",
-    "--agent", "openclaw-mcp",
-    "--access", "read-only"
-  ]
-}'
-```
-
-Use a distinct MCP `agent_id` unless that client is intentionally trusted to share a native OpenClaw agent's private identity. The native plugin does not call this MCP server internally.
-
-## Authenticated Streamable HTTP
-
-HTTP fails closed unless a bearer token is configured or the unsafe override is explicit.
-
-```bash
-export AGENT_RECALL_MCP_TOKEN='generate-a-long-random-token'
-agent-recall-mcp \
-  --config /path/to/agent-recall.json \
-  --transport streamable-http \
-  --host 127.0.0.1 \
-  --port 8765 \
-  --auth-token-env AGENT_RECALL_MCP_TOKEN
-```
-
-Endpoint: `http://127.0.0.1:8765/mcp`
-
-Clients send:
-
-```text
-Authorization: Bearer <token>
-```
-
-For a public tunnel, keep AgentRecall bound to loopback, tunnel only that port, configure the client with the public `/mcp` URL, and set the same bearer credential. Do not pass `--allow-unauthenticated-http` on a public or shared interface.
-
-## Security notes
-
-- Use a separate AgentRecall config/identity per MCP client trust boundary.
-- Prefer `read-only` for IDEs, analytics, or untrusted agents.
-- The token protects transport access; AgentRecall ACLs still protect row visibility and mutation.
-- Public results omit session identifiers and redact absolute server-path metadata.
-- Keep secrets in environment variables, not `agent-recall.json`.
-- Public HTTP exposes local memory contents to whoever has the token; rotate it after accidental disclosure.
+`remember` accepts an optional `canonical_key` for a scoped canonical upsert and
+an optional `expires_at` timestamp. `update` can change `expires_at` or clear it
+with `0`; expired memories are excluded from recall. Expiration is logical until
+an authorized core maintenance operation performs physical cleanup. MCP does not
+expose arbitrary administrative maintenance or raw session archive routing.

@@ -11,7 +11,8 @@ from pathlib import Path
 COPY_FILES = frozenset({
     "__init__.py", "cli.py", "plugin.yaml",
     "agent_recall_core.py", "agent_recall_curator.py", "agent_recall_store.py",
-    "agent_recall_schemas.py", "agent_recall_mcp.py", "agent_recall_bridge.py",
+    "agent_recall_schemas.py", "agent_recall_session_archive.py",
+    "agent_recall_mcp.py", "agent_recall_mcp_contracts.py", "agent_recall_mcp_runtime.py", "agent_recall_bridge.py",
     "hermes_plugin/__init__.py", "hermes_plugin/plugin.yaml",
     "LICENSE", "README.md", "INSTALL.md", "CHANGELOG.md", "SECURITY.md",
     "CONTRIBUTING.md", "pyproject.toml", "uv.lock",
