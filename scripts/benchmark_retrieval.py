@@ -407,6 +407,7 @@ def run_synthetic_benchmark(db_path: Path) -> dict[str, object]:
         raise
     os.close(staged_fd)
     reserved_sidecars: list[dict[str, Any]] = []
+    reservation_descriptors: list[int] = []
     staged_identity = staged_path.lstat()
     published = False
 
@@ -440,9 +441,6 @@ def run_synthetic_benchmark(db_path: Path) -> dict[str, object]:
         errors: list[Exception] = []
         for index, reservation in enumerate(list(reversed(reserved_sidecars))):
             path = reservation["path"]
-            if not reservation["closed"]:
-                os.close(reservation["descriptor"])
-                reservation["closed"] = True
             captured_path = publish_dir / f"reserved-sidecar-{index}"
             try:
                 capture_expected_path(
@@ -486,14 +484,13 @@ def run_synthetic_benchmark(db_path: Path) -> dict[str, object]:
         try:
             for sidecar_path in protected_paths[1:]:
                 descriptor = os.open(sidecar_path, flags, 0o600)
+                reservation_descriptors.append(descriptor)
                 reservation = os.fstat(descriptor)
                 reserved_sidecars.append(
                     {
                         "path": sidecar_path,
-                        "descriptor": descriptor,
                         "device": reservation.st_dev,
                         "inode": reservation.st_ino,
-                        "closed": False,
                     }
                 )
         except FileExistsError as exc:
@@ -529,6 +526,10 @@ def run_synthetic_benchmark(db_path: Path) -> dict[str, object]:
             raise RuntimeError("benchmark publication rollback could not safely restore every reserved path") from cleanup_errors[0]
         raise
     finally:
+        # Pin every reservation inode through identity checks, rename/unlink,
+        # and rollback retries: an unlinked inode must not be reused meanwhile.
+        for descriptor in reservation_descriptors:
+            os.close(descriptor)
         staged_path.unlink(missing_ok=True)
         db_path.unlink(missing_ok=True)
         with suppress(OSError):

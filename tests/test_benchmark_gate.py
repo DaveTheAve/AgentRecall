@@ -115,6 +115,99 @@ def test_synthetic_benchmark_restores_a_sidecar_replaced_during_post_link_releas
     assert list(tmp_path.glob(f".{db_path.name}.publish-*")) == []
 
 
+@pytest.mark.parametrize("outcome", ["success", "replacement", "retry", "persistent-failure", "link-failure"])
+def test_synthetic_benchmark_pins_reservation_inodes_until_cleanup(tmp_path, monkeypatch, outcome):
+    db_path = tmp_path / "pinned.db"
+    wal_path = Path(f"{db_path}-wal")
+    sidecars = {Path(f"{db_path}{suffix}") for suffix in ("-wal", "-shm", "-journal")}
+    real_open = benchmark_retrieval.os.open
+    real_close = benchmark_retrieval.os.close
+    real_rename = benchmark_retrieval.os.rename
+    real_unlink = Path.unlink
+    descriptors = {}
+    live = set()
+    attempts = 0
+    sentinel = b"replacement must survive reservation cleanup"
+
+    def track_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if Path(path) in sidecars:
+            descriptors[Path(path)] = fd
+            live.add(fd)
+        return fd
+
+    def track_close(fd):
+        real_close(fd)
+        live.discard(fd)
+
+    def assert_pinned(path):
+        fd = descriptors[path]
+        assert fd in live, "reservation descriptor closed before identity-sensitive cleanup"
+        benchmark_retrieval.os.fstat(fd)
+
+    def racing_rename(source, target):
+        nonlocal attempts
+        source = Path(source)
+        if source in sidecars:
+            assert_pinned(source)
+        if source == wal_path:
+            attempts += 1
+            if outcome == "persistent-failure" or (outcome == "retry" and attempts == 1):
+                raise OSError("injected reservation release failure")
+            if outcome == "replacement":
+                wal_path.unlink()
+                wal_path.write_bytes(sentinel)
+                assert_pinned(wal_path)
+        return real_rename(source, target)
+
+    def checked_unlink(path, *args, **kwargs):
+        if path.name.startswith("reserved-sidecar-") and path.exists():
+            identity = path.lstat()
+            # Pin through the final identity-sensitive unlink, not just rename.
+            assert any(
+                fd in live and benchmark_retrieval.os.fstat(fd).st_ino == identity.st_ino
+                for fd in descriptors.values()
+            ) or (outcome == "replacement" and path.read_bytes() == sentinel)
+        return real_unlink(path, *args, **kwargs)
+
+    def fail_link(_source, _target):
+        raise OSError("injected link failure")
+
+    monkeypatch.setattr(benchmark_retrieval.os, "open", track_open)
+    monkeypatch.setattr(benchmark_retrieval.os, "close", track_close)
+    monkeypatch.setattr(benchmark_retrieval.os, "rename", racing_rename)
+    monkeypatch.setattr(Path, "unlink", checked_unlink)
+    if outcome == "link-failure":
+        monkeypatch.setattr(benchmark_retrieval.os, "link", fail_link)
+    try:
+        if outcome == "success":
+            run_synthetic_benchmark(db_path)
+            assert db_path.exists()
+        else:
+            error = RuntimeError if outcome in {"replacement", "persistent-failure"} else OSError
+            message = {
+                "replacement": "sidecar reservation was replaced",
+                "persistent-failure": "rollback could not safely restore",
+                "retry": "injected reservation release failure",
+                "link-failure": "injected link failure",
+            }[outcome]
+            with pytest.raises(error, match=message):
+                run_synthetic_benchmark(db_path)
+            assert not db_path.exists()
+        assert len(descriptors) == 3
+        assert live == set(), "reservation descriptors leaked after publication"
+        if outcome in {"retry", "persistent-failure"}:
+            assert attempts == 2
+        if outcome == "replacement":
+            assert wal_path.read_bytes() == sentinel
+        elif outcome != "persistent-failure":
+            assert not wal_path.exists()
+    finally:
+        # Keep a failing regression from leaking descriptors into later tests.
+        for fd in live:
+            real_close(fd)
+
+
 def test_synthetic_benchmark_fails_if_published_target_is_replaced_during_sidecar_release(tmp_path, monkeypatch):
     db_path = tmp_path / "post-link-target-race.db"
     wal_path = Path(f"{db_path}-wal")
