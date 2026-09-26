@@ -32,7 +32,7 @@ Issues = "https://github.com/DaveTheAve/AgentRecall/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.5", "setuptools>=77"]
-mcp = ["mcp>=1.14,<2"]
+mcp = ["mcp>=1.14,<3"]
 
 [project.scripts]
 agent-recall-mcp = "agent_recall_mcp:main"

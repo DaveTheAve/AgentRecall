@@ -347,7 +347,9 @@ def test_retrieval_benchmark_gate_runs_against_temp_database_without_live_profil
     payload = json.loads(completed.stdout)
     assert payload["gate_passed"] is True
     assert payload["db_path"] == str(tmp_path / "bench.db")
-    assert "/.hermes/" not in payload["db_path"]
+    # TMPDIR may itself be under .hermes/cache/scratch; require the disposable
+    # test directory, not a spelling that excludes legitimate scratch roots.
+    assert Path(payload["db_path"]).resolve().parent == tmp_path.resolve()
     with sqlite3.connect(payload["db_path"]) as conn:
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert conn.execute("SELECT count(*) FROM memories").fetchone()[0] == 11

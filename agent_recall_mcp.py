@@ -126,7 +126,10 @@ def build_fastmcp(adapter, *, workers=2, queue_capacity=2, operation_timeout=30.
     """Use explicit SDK handlers, not FastMCP's coercing/echoing function models."""
     try:
         from mcp import types
-        from mcp.server.fastmcp import FastMCP
+        try:
+            from mcp.server.mcpserver import MCPServer as FastMCP
+        except ImportError:
+            from mcp.server.fastmcp import FastMCP
     except ImportError as exc:
         raise RuntimeError("The optional 'mcp' package is required to run the AgentRecall MCP server") from exc
     if adapter.runtime is not None:
@@ -149,7 +152,7 @@ def build_fastmcp(adapter, *, workers=2, queue_capacity=2, operation_timeout=30.
                     idempotentHint=name in {"get_memory", "health", "capabilities", "stats", "forget"} or (adapter.access == "read-only" and name in tracked),
                     openWorldHint=name in external)) for name in adapter.tools]
 
-        async def call_tool(self, name, arguments=None):
+        async def call_tool(self, name, arguments=None, context=None):
             try:
                 values = adapter.prepare(name, arguments)
                 if name in {"health", "capabilities"}:
@@ -166,6 +169,9 @@ def build_fastmcp(adapter, *, workers=2, queue_capacity=2, operation_timeout=30.
                                         structuredContent=error, isError=True)
 
     server = PublicFastMCP("AgentRecall")
+    if hasattr(server, "_lowlevel_server"):
+        _protect_sdk2_handlers(server)
+        return server
     # Avoid SDK unknown-tool and output-validation exception echo paths too.
     async def handle_call(request):
         return types.ServerResult(await server.call_tool(request.params.name, request.params.arguments))
@@ -204,6 +210,38 @@ def build_fastmcp(adapter, *, workers=2, queue_capacity=2, operation_timeout=30.
     return server
 
 
+def _protect_sdk2_handlers(server):
+    """SDK 2 uses method-keyed, context/params handlers and unwrapped results."""
+    from mcp import types
+    from mcp.server.lowlevel.server import HandlerEntry
+    from mcp.shared.exceptions import MCPError
+
+    def public_handler(handler):
+        async def handle(context, params):
+            try:
+                result = await handler(context, params)
+                if isinstance(result, types.ErrorData):
+                    raise MCPError(result.code, "Operation failed.")
+                if isinstance(result, types.CallToolResult) and result.is_error:
+                    details = (result.structured_content or {}).get("error", {})
+                    code = details.get("code") if isinstance(details, dict) else None
+                    if not isinstance(code, str) or code not in ERRORS:
+                        code = "backend_error"
+                    error = {"success": False, "error": {"code": code, "message": ERRORS[code]}}
+                    return types.CallToolResult(isError=True, structuredContent=error,
+                        content=[types.TextContent(type="text", text=json.dumps(error))])
+                return result
+            except MCPError as exc:
+                raise MCPError(exc.error.code, "Operation failed.") from None
+            except Exception:
+                raise MCPError(types.INTERNAL_ERROR, "Operation failed.") from None
+        return handle
+
+    lowlevel = server._lowlevel_server
+    for method, entry in tuple(lowlevel._request_handlers.items()):
+        lowlevel._request_handlers[method] = HandlerEntry(entry.params_type, public_handler(entry.handler))
+
+
 def create_adapter_from_config(
     config_path: str | Path,
     *,
@@ -235,9 +273,17 @@ def run_http_server(server, *, transport: str, host: str, port: int, bearer_toke
     except ImportError as exc:  # pragma: no cover - provided by the MCP HTTP extra
         raise RuntimeError("MCP HTTP transport requires uvicorn and starlette") from exc
 
-    app = server.streamable_http_app() if transport == "streamable-http" else server.sse_app()
-    app = HTTPBoundary(app, bearer_token=bearer_token,
-                       security_settings=server.settings.transport_security)
+    if hasattr(server, "_lowlevel_server"):
+        from mcp.server.transport_security import TransportSecuritySettings
+        security = TransportSecuritySettings(enable_dns_rebinding_protection=True,
+            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
+            allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"])
+        app = (server.streamable_http_app(transport_security=security) if transport == "streamable-http"
+               else server.sse_app(transport_security=security))
+    else:
+        security = server.settings.transport_security
+        app = server.streamable_http_app() if transport == "streamable-http" else server.sse_app()
+    app = HTTPBoundary(app, bearer_token=bearer_token, security_settings=security)
 
     uvicorn.run(app, host=host, port=port, log_level="info")
 

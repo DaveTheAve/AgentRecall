@@ -179,7 +179,8 @@ def public_observation(value, *, access_error_type=(), public_error_type=(), dia
             # Only the SDK's known wrapper preserves contract provenance.
             # An arbitrary RuntimeError caused by ValidationError is still a
             # runtime failure, not an argument rejection.
-            wrapper = getattr(sys.modules.get("mcp.server.fastmcp.exceptions"), "ToolError", ())
+            wrapper = tuple(cls for module in ("mcp.server.fastmcp.exceptions", "mcp.server.mcpserver.exceptions")
+                            if isinstance(cls := getattr(sys.modules.get(module), "ToolError", None), type))
             if not isinstance(exc, wrapper):
                 break
             exc = exc.__cause__
@@ -218,7 +219,8 @@ async def invoke_mcp(adapter, sdk, operation, arguments, mcp_module, types=None)
     response and never classifies text resembling a validation message.
     """
     diagnostic = None
-    low = sdk._mcp_server if sdk is not None else None
+    sdk2 = sdk is not None and hasattr(sdk, "_lowlevel_server")
+    low = (sdk._lowlevel_server if sdk2 else sdk._mcp_server) if sdk is not None else None
     original = getattr(low, "_make_error_result", None)
     had_own = low is not None and "_make_error_result" in vars(low)
     def observe_error(*args, **kwargs):
@@ -228,6 +230,10 @@ async def invoke_mcp(adapter, sdk, operation, arguments, mcp_module, types=None)
     try:
         if low is None:
             result = adapter.call(operation, arguments)
+        elif sdk2:
+            # SDK 2's high-level call preserves typed exceptions, unlike the
+            # legacy low-level handler's flattening path observed below.
+            result = await sdk.call_tool(operation, arguments)
         else:
             if original is not None:
                 low._make_error_result = observe_error

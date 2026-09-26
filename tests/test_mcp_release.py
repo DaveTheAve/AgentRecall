@@ -70,12 +70,12 @@ agent_recall_mcp.main()
             assert {"search", "get_memory", "health", "capabilities"} <= names
             assert not {"remember", "update_memory", "forget", "curate"} & names
             for tool in tools:
-                assert tool.outputSchema, tool.name
-                assert tool.inputSchema.get("additionalProperties") is False, tool.name
+                assert tool.model_dump(by_alias=True)["outputSchema"], tool.name
+                assert tool.model_dump(by_alias=True)["inputSchema"].get("additionalProperties") is False, tool.name
             health = await session.call_tool("health", {})
-            assert not health.isError
+            assert not health.model_dump(by_alias=True)["isError"]
             rejected = await session.call_tool("search", {"query": "sample", "agent_id": "spoof"})
-            assert rejected.isError
+            assert rejected.model_dump(by_alias=True)["isError"]
             assert "spoof" not in rejected.model_dump_json()
 
     asyncio.run(run())

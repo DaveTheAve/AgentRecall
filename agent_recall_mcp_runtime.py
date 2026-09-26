@@ -119,6 +119,20 @@ class UnknownMethod(Exception):
         super().__init__("Method not found")
 
 
+def _validate_model(model, value):
+    from pydantic import TypeAdapter
+    return TypeAdapter(model).validate_python(value)
+
+
+def _message_root(message):
+    return getattr(message, "root", message)
+
+
+def _jsonrpc_message(value):
+    from mcp import types
+    return _validate_model(types.JSONRPCMessage, value)
+
+
 def parse_message(body):
     """Validate before the SDK can echo Pydantic inputs. No raw exception escapes."""
     import json
@@ -143,21 +157,23 @@ def parse_message(body):
         bounded_json(raw, byte_limit=MAX_BODY_BYTES, string_limit=MAX_BODY_BYTES, depth_limit=12)
         if type(raw) is not dict or raw.keys() - {"jsonrpc", "id", "method", "params", "result", "error"}:
             raise ValueError()
-        message = types.JSONRPCMessage.model_validate(raw)
-        if isinstance(message.root, types.JSONRPCRequest):
+        message = _jsonrpc_message(raw)
+        envelope = _message_root(message)
+        if isinstance(envelope, types.JSONRPCRequest):
             if raw.keys() - {"jsonrpc", "id", "method", "params"}:
                 raise ValueError()
             known_methods = {model.model_fields["method"].default
-                             for model in get_args(types.ClientRequest.model_fields["root"].annotation)}
-            if message.root.method not in known_methods:
-                raise UnknownMethod(message.root.id)
-            types.ClientRequest.model_validate(raw)
+                             for model in get_args(types.ClientRequest.model_fields["root"].annotation
+                                                   if hasattr(types.ClientRequest, "model_fields") else types.ClientRequest)}
+            if envelope.method not in known_methods:
+                raise UnknownMethod(envelope.id)
+            _validate_model(types.ClientRequest, raw)
             if raw["method"] == "tools/call":
                 params = raw.get("params", {})
                 if params.keys() - {"name", "arguments", "_meta"}:
                     raise ValueError()
-        elif isinstance(message.root, types.JSONRPCNotification):
-            types.ClientNotification.model_validate(raw)
+        elif isinstance(envelope, types.JSONRPCNotification):
+            _validate_model(types.ClientNotification, raw)
         return message
     except UnknownMethod:
         raise
@@ -197,7 +213,7 @@ async def run_stdio(server):
                         raise ValueError()
                     message = parse_message(line)
                 except UnknownMethod as exc:
-                    await writer.send(SessionMessage(types.JSONRPCMessage.model_validate(exc.response)))
+                    await writer.send(SessionMessage(_jsonrpc_message(exc.response)))
                     continue
                 except Exception:
                     code = "request_too_large" if oversized else "invalid_request"
@@ -206,7 +222,7 @@ async def run_stdio(server):
                     # this local, constant error without coercing a caller's ID.
                     error = types.JSONRPCError.model_construct(jsonrpc="2.0", id=None,
                         error=types.ErrorData(code=-32600, message=code))
-                    await writer.send(SessionMessage(types.JSONRPCMessage(error)))
+                    await writer.send(SessionMessage(_jsonrpc_message(error)))
                     continue
                 await incoming.send(SessionMessage(message))
 
@@ -214,7 +230,8 @@ async def run_stdio(server):
         async with outgoing:
             async for message in outgoing:
                 payload = message.message.model_dump(by_alias=True, exclude_none=True, mode="json")
-                if isinstance(message.message.root, types.JSONRPCError) and message.message.root.id is None:
+                envelope = _message_root(message.message)
+                if isinstance(envelope, types.JSONRPCError) and envelope.id is None:
                     payload["id"] = None
                 data = (json.dumps(payload, ensure_ascii=False) + "\n").encode()
                 await anyio.to_thread.run_sync(sys.stdout.buffer.write, data, abandon_on_cancel=True)
@@ -224,7 +241,8 @@ async def run_stdio(server):
         tasks.start_soon(read_frames)
         tasks.start_soon(write_frames)
         try:
-            await server._mcp_server.run(reader, writer, server._mcp_server.create_initialization_options())
+            lowlevel = server._lowlevel_server if hasattr(server, "_lowlevel_server") else server._mcp_server
+            await lowlevel.run(reader, writer, lowlevel.create_initialization_options())
         finally:
             tasks.cancel_scope.cancel()
 

@@ -34,7 +34,7 @@ def test_curator_canonical_collision_requires_destructive_hint(tmp_path, operati
             "SELECT content FROM memories WHERE id = ?", (original["id"],)).fetchone()
         assert row[0] == "Replacement curated fact"
         tools = asyncio.run(server.list_tools())
-        assert next(tool for tool in tools if tool.name == operation).annotations.destructiveHint is True
+        assert next(tool for tool in tools if tool.name == operation).annotations.model_dump(by_alias=True)["destructiveHint"] is True
     finally:
         adapter.close()
 
@@ -43,30 +43,45 @@ def test_curator_canonical_collision_requires_destructive_hint(tmp_path, operati
 @pytest.mark.parametrize("request_name", ["GetPromptRequest", "ReadResourceRequest", "SubscribeRequest", "CompleteRequest"])
 def test_all_registered_handler_errors_are_sanitized(tmp_path, monkeypatch, failure, request_name):
     from mcp import types
-    from mcp.server.fastmcp import FastMCP
-    from mcp.shared.exceptions import McpError
+    try:
+        from mcp.server.lowlevel.server import HandlerEntry
+        from mcp.server.mcpserver import MCPServer as FastMCP
+        from mcp.shared.exceptions import MCPError as McpError
+        sdk2 = True
+    except ImportError:
+        from mcp.server.fastmcp import FastMCP
+        from mcp.shared.exceptions import McpError
+        sdk2 = False
 
-    setup = FastMCP._setup_handlers
-    async def failing_handler(request):
+    setup = FastMCP.__init__ if sdk2 else FastMCP._setup_handlers
+    async def failing_handler(*args):
         error = types.ErrorData(code=-32602, message=SECRET, data={"private": SECRET})
         if failure == "exception":
             raise ValueError(SECRET)
         if failure == "rpc_exception":
-            raise McpError(error)
+            raise McpError(error.code, error.message, error.data) if sdk2 else McpError(error)
         if failure == "rpc_result":
             return error
-        return types.ServerResult(types.CallToolResult(isError=True,
+        result = types.CallToolResult(isError=True,
             content=[types.TextContent(type="text", text=SECRET)],
-            structuredContent={"private": SECRET}))
-    def setup_with_failure(self):
-        setup(self)
-        self._mcp_server.request_handlers[getattr(types, request_name)] = failing_handler
-    monkeypatch.setattr(FastMCP, "_setup_handlers", setup_with_failure)
+            structuredContent={"private": SECRET})
+        return result if sdk2 else types.ServerResult(result)
+    method = getattr(types, request_name).model_fields["method"].default
+    def setup_with_failure(self, *args, **kwargs):
+        setup(self, *args, **kwargs)
+        if sdk2:
+            self._lowlevel_server._request_handlers[method] = HandlerEntry(types.RequestParams, failing_handler)
+        else:
+            self._mcp_server.request_handlers[getattr(types, request_name)] = failing_handler
+    monkeypatch.setattr(FastMCP, "__init__" if sdk2 else "_setup_handlers", setup_with_failure)
     adapter = make_adapter(tmp_path)
     server = build_fastmcp(adapter)
     async def run():
         try:
-            result = await server._mcp_server.request_handlers[getattr(types, request_name)](None)
+            if sdk2:
+                result = await server._lowlevel_server._request_handlers[method].handler(None, None)
+            else:
+                result = await server._mcp_server.request_handlers[getattr(types, request_name)](None)
         except McpError as exc:
             assert failure != "tool_result"
             assert SECRET not in exc.error.model_dump_json()
@@ -75,7 +90,7 @@ def test_all_registered_handler_errors_are_sanitized(tmp_path, monkeypatch, fail
                 assert exc.error.code == -32602
         else:
             assert failure == "tool_result"
-            assert result.root.isError
+            assert (result if sdk2 else result.root).model_dump(by_alias=True)["isError"]
             assert SECRET not in result.model_dump_json()
     try:
         asyncio.run(run())
@@ -154,16 +169,16 @@ def test_sdk_sanitizes_validation_and_annotations(tmp_path):
     async def run():
         tools = await server.list_tools()
         for tool in tools:
-            assert tool.inputSchema["additionalProperties"] is False
-            assert tool.outputSchema["additionalProperties"] is False
-            assert tool.annotations.openWorldHint is (tool.name in {"search", "prefetch_context", "profile", "remember", "update", "curate", "conclude", "profile_synthesize", "review"})
+            assert tool.model_dump(by_alias=True)["inputSchema"]["additionalProperties"] is False
+            assert tool.model_dump(by_alias=True)["outputSchema"]["additionalProperties"] is False
+            assert tool.annotations.model_dump(by_alias=True)["openWorldHint"] is (tool.name in {"search", "prefetch_context", "profile", "remember", "update", "curate", "conclude", "profile_synthesize", "review"})
         for args in ({"query": SECRET, "limit": "bad"}, {"query": SECRET, "agent_id": SECRET}):
             result = await server.call_tool("search", args)
-            assert result.isError
+            assert result.model_dump(by_alias=True)["isError"]
             assert SECRET not in result.model_dump_json()
             assert "invalid_arguments" in result.model_dump_json()
         result = await server.call_tool(SECRET, {})
-        assert result.isError and SECRET not in result.model_dump_json()
+        assert result.model_dump(by_alias=True)["isError"] and SECRET not in result.model_dump_json()
     asyncio.run(run())
     adapter.close()
 
@@ -183,12 +198,12 @@ def test_deadlines_capacity_cancellation_and_responsive_health(tmp_path, monkeyp
         await asyncio.sleep(0.01)
         assert entered.is_set()
         health = await asyncio.wait_for(server.call_tool("health", {}), 0.1)
-        assert not health.isError
+        assert not health.model_dump(by_alias=True)["isError"]
         result = await task
-        assert result.isError and "may complete" in result.model_dump_json()
+        assert result.model_dump(by_alias=True)["isError"] and "may complete" in result.model_dump_json()
         assert not completed.is_set()
         busy = await server.call_tool("remember", {"content": "x"})
-        assert busy.isError and "busy" in busy.model_dump_json()
+        assert busy.model_dump(by_alias=True)["isError"] and "busy" in busy.model_dump_json()
         release.set()
         while not completed.is_set():
             await asyncio.sleep(0.005)
@@ -279,16 +294,16 @@ def test_queued_cancellation_shutdown_and_execution_permissions(tmp_path, monkey
         revoked = asyncio.create_task(server.call_tool("remember", {"content": "revoked"}))
         await asyncio.sleep(0.01)
         adapter._tools = frozenset({"health", "capabilities"})
-        assert not (await asyncio.wait_for(server.call_tool("capabilities", {}), .1)).isError
+        assert not (await asyncio.wait_for(server.call_tool("capabilities", {}), .1)).model_dump(by_alias=True)["isError"]
         release.set()
-        assert not (await first).isError
+        assert not (await first).model_dump(by_alias=True)["isError"]
         result = await revoked
-        assert result.structuredContent["error"]["code"] == "forbidden"
+        assert result.model_dump(by_alias=True)["structuredContent"]["error"]["code"] == "forbidden"
         assert calls == ["first"]
         adapter.close()
         with pytest.raises(MCPPublicError, match="closed"):
             await adapter.runtime.run(lambda: calls.append("after-close"))
-        assert (await server.call_tool("health", {})).structuredContent["error"]["code"] == "closed"
+        assert (await server.call_tool("health", {})).model_dump(by_alias=True)["structuredContent"]["error"]["code"] == "closed"
     try:
         asyncio.run(run())
     finally:
@@ -302,12 +317,16 @@ def test_queued_cancellation_shutdown_and_execution_permissions(tmp_path, monkey
     ("origin", "http://localhost:80/evil"),
 ])
 def test_http_guard_rejects_prefix_confusion(header, value):
-    import httpx
-    from mcp.server.fastmcp import FastMCP
+    try:
+        import httpx2 as httpx
+    except ImportError:
+        import httpx
+    from mcp.server.transport_security import TransportSecuritySettings
     async def app(scope, receive, send):
         from starlette.responses import JSONResponse
         await JSONResponse({"ok": True})(scope, receive, send)
-    guarded = HTTPBoundary(app, bearer_token="test", security_settings=FastMCP().settings.transport_security)
+    guarded = HTTPBoundary(app, bearer_token="test", security_settings=TransportSecuritySettings(enable_dns_rebinding_protection=True,
+                                    allowed_hosts=["localhost:*"], allowed_origins=["http://localhost:*"]))
     async def run():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=guarded), base_url="http://localhost:8765") as client:
             response = await client.get("/mcp", headers={"Authorization": "Bearer test", header: value})
@@ -390,7 +409,7 @@ def test_unknown_method_malformed_envelope_stays_invalid(overrides):
 
 @pytest.mark.parametrize("mode", ["complete", "timeout", "cancel", "disconnect"])
 def test_http_body_deadline_and_cancellation(mode):
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.transport_security import TransportSecuritySettings
 
     reached, sent = [], []
     async def app(scope, receive, send):
@@ -410,7 +429,8 @@ def test_http_body_deadline_and_cancellation(mode):
             finally:
                 cancelled.set()
         boundary = HTTPBoundary(app, bearer_token="", body_timeout=.03,
-                                security_settings=FastMCP().settings.transport_security)
+                                security_settings=TransportSecuritySettings(enable_dns_rebinding_protection=True,
+                                    allowed_hosts=["localhost:*"], allowed_origins=["http://localhost:*"]))
         scope = {"type": "http", "method": "POST", "path": "/mcp", "headers": [(b"host", b"localhost:8765")]}
         task = asyncio.create_task(boundary(scope, receive, send))
         if mode == "cancel":

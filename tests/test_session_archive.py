@@ -501,6 +501,7 @@ def test_preinitialization_schema_registers_real_memory_manager_route(tmp_path):
         TEST_HOME=str(tmp_path),
         PYTHONPATH=os.pathsep.join([str(host_root), str(ROOT)]),
         PYTHONDONTWRITEBYTECODE="1",
+        HERMES_DISABLE_LAZY_INSTALLS="1",
     )
 
     result = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True)
@@ -514,7 +515,7 @@ def test_real_host_enabled_search_and_bare_foreign_id_fail_closed(tmp_path):
     )
     if not (host_root / "tools" / "session_search_tool.py").is_file():
         pytest.skip("real Hermes source checkout is unavailable")
-    host_python = host_root / "venv" / "bin" / "python"
+    host_python = Path(os.environ.get("AGENT_RECALL_HERMES_PYTHON", host_root / "venv" / "bin" / "python"))
     if not host_python.is_file():
         pytest.skip("real Hermes runtime Python is unavailable")
     script = textwrap.dedent(
@@ -587,6 +588,7 @@ def test_real_host_enabled_search_and_bare_foreign_id_fail_closed(tmp_path):
         HERMES_HOME=str(tmp_path),
         PYTHONPATH=os.pathsep.join([str(host_root), str(ROOT)]),
         PYTHONDONTWRITEBYTECODE="1",
+        HERMES_DISABLE_LAZY_INSTALLS="1",
     )
 
     result = subprocess.run(

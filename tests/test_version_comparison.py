@@ -303,7 +303,10 @@ def test_sdk_typed_validation_is_not_confused_with_generic_tool_error(tmp_path, 
     pytest.importorskip("mcp")
 
     from mcp import types
-    from mcp.server.fastmcp import FastMCP
+    try:
+        from mcp.server.mcpserver import MCPServer as FastMCP
+    except ImportError:
+        from mcp.server.fastmcp import FastMCP
     mod = harness()
     server = FastMCP("FIXTURE")
     @server.tool()

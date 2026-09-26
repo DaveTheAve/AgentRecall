@@ -12,7 +12,10 @@ from pathlib import Path
 import pytest
 
 try:
-    import httpx
+    try:
+        import httpx2 as httpx
+    except ImportError:
+        import httpx
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
     from mcp.client.streamable_http import streamable_http_client
@@ -26,7 +29,10 @@ async def assert_non_tool_errors_are_public(session):
     from datetime import timedelta
 
     from mcp import types
-    from mcp.shared.exceptions import McpError
+    try:
+        from mcp.shared.exceptions import MCPError as McpError
+    except ImportError:
+        from mcp.shared.exceptions import McpError
     from pydantic import AnyUrl
 
     # A generic request models a future/extension method the SDK union lacks.
@@ -34,7 +40,7 @@ async def assert_non_tool_errors_are_public(session):
         await session.send_request(
             types.Request(method="private-unknown-method-sentinel", params={}),
             types.EmptyResult,
-            request_read_timeout_seconds=timedelta(seconds=2),
+            request_read_timeout_seconds=(timedelta(seconds=2) if hasattr(types.ClientRequest, "model_fields") else 2.0),
         )
     assert unknown.value.error.code == -32601
     assert unknown.value.error.message == "Method not found"
@@ -45,7 +51,8 @@ async def assert_non_tool_errors_are_public(session):
     responses = []
     for call in (
         lambda: session.get_prompt(sentinel),
-        lambda: session.read_resource(AnyUrl(f"file:///private/{sentinel}.sqlite")),
+        lambda: session.read_resource(AnyUrl(f"file:///private/{sentinel}.sqlite")
+                                      if hasattr(types.ClientRequest, "model_fields") else f"file:///private/{sentinel}.sqlite"),
     ):
         with pytest.raises(McpError) as caught:
             await call()
@@ -82,11 +89,20 @@ def test_real_mcp_stdio_discovery_and_health(tmp_path):
             names = {tool.name for tool in tools.tools}
             assert {"remember", "search", "prefetch_context", "get_memory", "health", "capabilities"} <= names
             remember_tool = next(tool for tool in tools.tools if tool.name == "remember")
-            assert {"canonical_key", "expires_at"} <= set(remember_tool.inputSchema["properties"])
+            assert {"canonical_key", "expires_at"} <= set(remember_tool.model_dump(by_alias=True)["inputSchema"]["properties"])
             health = await session.call_tool("health", {})
-            assert health.isError is False
-            assert "quick_check" in str(health.structuredContent or health.content)
+            assert health.model_dump(by_alias=True)["isError"] is False
+            assert "quick_check" in str(health.model_dump(by_alias=True)["structuredContent"] or health.content)
             await assert_non_tool_errors_are_public(session)
+            saved = await session.call_tool("remember", {"content": "transportneedle durable memory"})
+            assert saved.model_dump(by_alias=True)["isError"] is False
+            memory_id = saved.model_dump(by_alias=True)["structuredContent"]["id"]
+            found = await session.call_tool("search", {"query": "transportneedle"})
+            assert memory_id in {row["id"] for row in found.model_dump(by_alias=True)["structuredContent"]["results"]}
+            removed = await session.call_tool("forget", {"id": memory_id})
+            assert removed.model_dump(by_alias=True)["isError"] is False
+            found = await session.call_tool("search", {"query": "transportneedle"})
+            assert found.model_dump(by_alias=True)["structuredContent"]["count"] == 0
 
     asyncio.run(run())
 
@@ -200,12 +216,12 @@ def test_streamable_http_requires_and_accepts_bearer_token(tmp_path):
             async with (
                 httpx.AsyncClient(headers={"Authorization": "Bearer test-secret-token"},
                                   event_hooks={"response": [observe_response]}) as client,
-                streamable_http_client(url, http_client=client) as (read, write, _),
-                ClientSession(read, write) as session,
+                streamable_http_client(url, http_client=client) as streams,
+                ClientSession(*streams[:2]) as session,
             ):
                 await session.initialize()
                 health = await session.call_tool("health", {})
-                assert health.isError is False
+                assert health.model_dump(by_alias=True)["isError"] is False
                 await assert_non_tool_errors_are_public(session)
                 assert {method for method, _, _ in rpc_transports} == {"prompts/get", "resources/read"}
                 assert all(status == 200 and "text/event-stream" in content_type
@@ -213,15 +229,15 @@ def test_streamable_http_requires_and_accepts_bearer_token(tmp_path):
                 from agent_recall_mcp import MCPAdapter
                 names = {tool.name for tool in (await session.list_tools()).tools}
                 assert not names & MCPAdapter.WRITE_TOOLS
-                capabilities = (await session.call_tool("capabilities", {})).structuredContent
+                capabilities = (await session.call_tool("capabilities", {})).model_dump(by_alias=True)["structuredContent"]
                 assert set(capabilities["tools"]) == names == set(capabilities["operations"])
                 for name in MCPAdapter.WRITE_TOOLS:
                     result = await session.call_tool(name, {"content": secret, "dry_run": True})
-                    assert result.isError and "forbidden" in result.model_dump_json()
+                    assert result.model_dump(by_alias=True)["isError"] and "forbidden" in result.model_dump_json()
                     assert secret not in result.model_dump_json()
                 for args in ({"query": secret, "agent_id": secret}, {"query": secret, "limit": "secret"}, {"query": "x" * 12001}):
                     result = await session.call_tool("search", args)
-                    assert result.isError and "invalid_arguments" in result.model_dump_json()
+                    assert result.model_dump(by_alias=True)["isError"] and "invalid_arguments" in result.model_dump_json()
                     assert secret not in result.model_dump_json()
 
         asyncio.run(run())

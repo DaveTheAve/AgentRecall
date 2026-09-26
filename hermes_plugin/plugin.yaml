@@ -1,7 +1,4 @@
 name: agent-recall
 version: 0.3.0
 description: "AgentRecall — host-neutral local memory engine with a native Hermes adapter."
-hooks:
-  - sync_turn
-  - on_pre_compress
-  - on_memory_write
+# MemoryProvider lifecycle methods are dispatched by MemoryManager, not generic hooks.

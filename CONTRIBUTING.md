@@ -11,6 +11,28 @@ npm test
 python scripts/benchmark_retrieval.py --mode synthetic --gate --json
 ```
 
+## Hermes and MCP compatibility tests
+
+Use an installed Hermes runtime for host-backed checks (not a bare interpreter
+with only this project's dependencies):
+
+```bash
+export AGENT_RECALL_HERMES_SOURCE=/path/to/hermes-agent
+export AGENT_RECALL_HERMES_PYTHON=/path/to/hermes-runtime/bin/python
+python -m pytest tests/test_hermes_compatibility.py tests/test_release_artifacts.py
+```
+
+The host probes use disposable homes and disable automatic dependency installation;
+they do not change live profiles. Both source and packaged manifests are checked by
+Hermes Plugin Doctor, then real provider discovery and MemoryManager callbacks.
+MemoryProvider lifecycle methods must not be declared as generic manifest hooks.
+
+The MCP extra supports SDK 1 and SDK 2. Run the full suite in separate environments
+with `mcp==1.30.0` and `mcp==2.0.0`; do not change the host's managed environment.
+`tests/test_mcp_sdk.py` exercises real stdio and authenticated Streamable HTTP,
+including memory round trips, malformed-frame recovery and error sanitization.
+`tests/test_mcp_release.py` repeats the stdio contract against an installed wheel.
+
 ## Design constraints
 
 - Preserve workspace + per-agent + per-session isolation.
